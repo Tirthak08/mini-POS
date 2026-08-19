@@ -1,0 +1,44 @@
+{
+  "name": "mini-pos-backend",
+  "version": "1.0.0",
+  "description": "Secure REST API for the Mini-POS & Inventory multi-tenant mobile app",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js",
+    "db:check": "node src/utils/checkDb.js",
+    "db:reset": "node src/utils/resetDb.js",
+    "dns:check": "node src/utils/checkDns.js",
+    "net:check": "node src/utils/checkNet.js",
+    "test": "node tests/smoke.mjs",
+    "test:standalone": "node tests/standalone-fallback.mjs",
+    "test:ratelimit": "node tests/ratelimit.mjs",
+    "test:clamp": "node tests/model-clamp.mjs"
+  },
+  "keywords": [
+    "pos",
+    "inventory",
+    "multi-tenant",
+    "mongodb"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.6.2",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.9.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14",
+    "mongodb": "^7.5.0",
+    "mongodb-memory-server": "^10.2.3"
+  },
+  "engines": {
+    "node": ">=20 <25"
+  }
+}

@@ -1,0 +1,40 @@
+# Render Blueprint -- deploys the Mini-POS API as one web service.
+#
+# Use: push the repo to GitHub, then in Render choose "New +" -> "Blueprint"
+# and point it at the repo. Render reads this file and provisions the service.
+# Secrets marked sync:false are typed into the Render dashboard, never
+# committed to git.
+services:
+  - type: web
+    name: mini-pos-api
+    runtime: node
+    # Singapore is Render's closest region to India -- Frankfurt/Oregon add
+    # 150ms+ to every tap on the POS.
+    region: singapore
+    plan: free
+    # The repo root contains backend/ and mobile/; only the backend deploys.
+    rootDir: backend
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    # Render marks a deploy live only when this returns 200, so a boot that
+    # cannot reach Atlas is caught at deploy time, not by the first customer.
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false # paste the Atlas connection string in the dashboard
+      - key: MONGODB_DB
+        value: mini_pos
+      - key: JWT_SECRET
+        generateValue: true # Render generates a long random value -- never commit one
+      - key: JWT_EXPIRES_IN
+        value: 30d
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: REPORT_TIMEZONE
+        value: Asia/Kolkata
+      - key: LOW_STOCK_THRESHOLD
+        value: "5"

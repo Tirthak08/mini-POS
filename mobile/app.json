@@ -1,0 +1,50 @@
+{
+  "expo": {
+    "name": "Mini POS",
+    "slug": "mini-pos",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#2563EB"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Photograph your products to show them on the sales screen.",
+        "NSPhotoLibraryUsageDescription": "Choose product pictures from your photo library."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#2563EB"
+      },
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "CAMERA",
+        "READ_MEDIA_IMAGES"
+      ],
+      "package": "com.keybrainstech.minipos",
+      "versionCode": 1
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow $(PRODUCT_NAME) to use your photos so you can add pictures to your products.",
+          "cameraPermission": "Allow $(PRODUCT_NAME) to use the camera so you can photograph your products."
+        }
+      ],
+      "expo-font"
+    ],
+    "scheme": "minipos"
+  }
+}
