@@ -176,6 +176,9 @@ export default {
   },
   errors: {
     network: 'Cannot reach the server', generic: 'Something went wrong',
+    networkRemote: 'Cannot reach the server. Check your internet connection and try again.',
+    serverSlow: 'The server took too long to answer. Please try again.',
+    serverWaking: 'Connecting to the server...',
     required: 'This field is required', sessionExpired: 'Session expired, please sign in again',
   },
 };

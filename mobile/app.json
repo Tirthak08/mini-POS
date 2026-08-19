@@ -26,8 +26,9 @@
       },
       "edgeToEdgeEnabled": true,
       "permissions": [
-        "CAMERA",
-        "READ_MEDIA_IMAGES"
+        "android.permission.CAMERA",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.RECORD_AUDIO"
       ],
       "package": "com.keybrainstech.minipos",
       "versionCode": 1
@@ -45,6 +46,11 @@
       ],
       "expo-font"
     ],
-    "scheme": "minipos"
+    "scheme": "minipos",
+    "extra": {
+      "eas": {
+        "projectId": "97a5c145-3bcd-4a68-bf98-3d3fd0c7e603"
+      }
+    }
   }
 }

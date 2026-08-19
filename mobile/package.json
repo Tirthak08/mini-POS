@@ -12,7 +12,8 @@
     "test:age": "node tests/relative-age-test.mjs",
     "test:offline": "node tests/offline-cache-test.mjs",
     "test:dropdown": "node tests/dropdown-test.mjs",
-    "test:receipt": "node tests/receipt-test.mjs"
+    "test:receipt": "node tests/receipt-test.mjs",
+    "test:network": "node tests/network-resilience-test.mjs"
   },
   "dependencies": {
     "@expo/metro-runtime": "~6.1.2",

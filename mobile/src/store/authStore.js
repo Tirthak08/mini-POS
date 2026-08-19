@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import i18n from '../i18n';
 import { authApi } from '../api/endpoints';
 import { configureApi } from '../api/client';
 
@@ -123,6 +124,13 @@ export const useAuthStore = create()(
 /** Wire the api layer to this store exactly once, at import time. */
 configureApi({
   tokenGetter: () => useAuthStore.getState().token,
+  /**
+   * A free-tier host that has gone to sleep takes ~50s to boot. Saying so is
+   * the difference between "the app is broken" and "it is starting up".
+   */
+  onServerWaking: () => {
+    import('./uiStore').then((m) => m.toast.info(i18n.t('errors.serverWaking')));
+  },
   onUnauthorized: () => {
     // Only bounce to login if we thought we were signed in.
     if (useAuthStore.getState().token) {

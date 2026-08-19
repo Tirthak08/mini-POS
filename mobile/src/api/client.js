@@ -1,5 +1,6 @@
 import axios from 'axios';
-import { API_BASE_URL, APP_CONFIG } from '../config';
+import i18n from '../i18n';
+import { API_BASE_URL, APP_CONFIG, IS_REMOTE_API } from '../config';
 
 /**
  * The token lives in the auth store, but importing the store here would create
@@ -8,10 +9,12 @@ import { API_BASE_URL, APP_CONFIG } from '../config';
  */
 let getToken = () => null;
 let handleUnauthorized = () => {};
+let handleServerWaking = () => {};
 
-export function configureApi({ tokenGetter, onUnauthorized }) {
+export function configureApi({ tokenGetter, onUnauthorized, onServerWaking }) {
   if (tokenGetter) getToken = tokenGetter;
   if (onUnauthorized) handleUnauthorized = onUnauthorized;
+  if (onServerWaking) handleServerWaking = onServerWaking;
 }
 
 export const api = axios.create({
@@ -43,19 +46,63 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Wakes a sleeping host without touching a real endpoint.
+ *
+ * /api/health needs no auth and writes nothing, so it is safe to fire on app
+ * start and whenever the app comes back to the foreground. By the time the
+ * operator taps "Complete order", the instance is already up -- which matters
+ * because a checkout must NOT be retried automatically (see below).
+ */
+export function wakeServer() {
+  return api
+    .get('/health', { timeout: APP_CONFIG.coldStartTimeoutMs, __noRetry: true })
+    .then(() => true)
+    .catch(() => false);
+}
+
+const networkMessage = (timedOut) => {
+  if (timedOut) return i18n.t('errors.serverSlow');
+  // The dev message names npm and Wi-Fi because on the LAN those really are the
+  // likely causes. Against a deployed API neither is, so it would just mislead.
+  return IS_REMOTE_API
+    ? i18n.t('errors.networkRemote')
+    : `Cannot reach the server at ${API_BASE_URL}. Check that "npm run dev" is running and that your phone is on the same Wi-Fi.`;
+};
+
 api.interceptors.response.use(
   (response) => response.data,
-  (error) => {
-    // No response at all: server down, wrong IP, phone on a different network.
+  async (error) => {
+    // No response at all: server down, asleep, or the phone lost its data.
     if (!error.response) {
-      const timedOut = error.code === 'ECONNABORTED';
+      const config = error.config || {};
+      const method = String(config.method || 'get').toLowerCase();
+
+      /**
+       * Retry reads once, with the cold-start window. Deliberately GET only:
+       * a timed-out POST may well have reached the server and been applied --
+       * the reply is what got lost -- so retrying a checkout could charge the
+       * customer twice and take stock twice. Reads have no such hazard.
+       */
+      const mayRetry = method === 'get' && !config.__noRetry && !config.__retried;
+      if (mayRetry) {
+        handleServerWaking();
+        try {
+          return await api.request({
+            ...config,
+            __retried: true,
+            timeout: APP_CONFIG.coldStartTimeoutMs,
+          });
+        } catch {
+          // fall through and report the original failure
+        }
+      }
+
       return Promise.reject(
         new ApiError({
           isNetwork: true,
           status: 0,
-          message: timedOut
-            ? 'The server took too long to answer. Is the backend still running?'
-            : `Cannot reach the server at ${API_BASE_URL}. Check that "npm run dev" is running and that your phone is on the same Wi-Fi.`,
+          message: networkMessage(error.code === 'ECONNABORTED'),
         })
       );
     }

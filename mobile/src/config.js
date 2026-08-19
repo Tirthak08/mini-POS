@@ -28,9 +28,24 @@ function inferLanApiUrl() {
 export const API_BASE_URL =
   process.env.EXPO_PUBLIC_API_URL || inferLanApiUrl() || `http://localhost:${API_PORT}/api`;
 
+/**
+ * True when we are talking to a deployed backend rather than a dev machine on
+ * the LAN. It decides which failure message the operator sees: telling a
+ * shopkeeper to "check that npm run dev is running and your phone is on the
+ * same Wi-Fi" is nonsense when the API lives on the public internet.
+ */
+export const IS_REMOTE_API = /^https:\/\//i.test(API_BASE_URL);
+
 export const APP_CONFIG = {
   currencySymbol: '₹',
   lowStockThreshold: 5,
   defaultCustomerName: 'Walk-in',
-  requestTimeoutMs: 15000,
+  requestTimeoutMs: 20000,
+  /**
+   * Render's free tier stops the instance after 15 minutes idle and takes
+   * roughly 50 seconds to boot again. A 20-second timeout means the FIRST
+   * request of every morning would always fail, so a wake-up ping and any
+   * retried read get this much longer window instead.
+   */
+  coldStartTimeoutMs: 70000,
 };
