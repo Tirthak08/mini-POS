@@ -185,6 +185,7 @@ export default {
     title: 'Settings',
     subtitle: 'Your shop',
     since: 'Since {{date}}',
+    openHint: 'Opens settings',
     accountGroup: 'Account',
     appGroup: 'App',
     aboutGroup: 'About',

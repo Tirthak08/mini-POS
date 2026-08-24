@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Vyapaar",
-    "slug": "vyapaar",
+    "slug": "mini-pos",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",

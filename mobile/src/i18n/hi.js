@@ -185,6 +185,7 @@ export default {
     title: 'सेटिंग',
     subtitle: 'आपकी दुकान',
     since: '{{date}} से',
+    openHint: 'सेटिंग खोलता है',
     accountGroup: 'खाता',
     appGroup: 'ऐप',
     aboutGroup: 'जानकारी',

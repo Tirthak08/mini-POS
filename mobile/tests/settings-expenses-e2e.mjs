@@ -205,7 +205,9 @@ check('the shop name sits on the RIGHT of the header', chipShowsShop?.right === 
 check('and inside the header band', chipShowsShop?.top === true, chipShowsShop);
 await page.screenshot({ path: `${SHOT}/header-shop-chip.png` });
 
-await page.getByRole('button', { name: new RegExp(`Settings.*${shop}`) }).last().click();
+// The name pill is labelled with the shop name alone now; the gear beside it
+// is the one labelled "Settings". Either opens Settings.
+await page.getByRole('button', { name: shop, exact: true }).last().click();
 await page.waitForTimeout(1400);
 const settingsText = await body();
 check('Settings opened', /Settings/.test(settingsText), settingsText.slice(0, 200));
@@ -460,17 +462,49 @@ const LANGS = [
 const headerBoxes = (titleText, shopText) => page.evaluate(([tt, st]) => {
   const leaf = (needle) => [...document.querySelectorAll('div,span')]
     .filter((el) => el.childElementCount === 0 && el.textContent.trim() === needle)
-    .map((el) => el.getBoundingClientRect())
-    .filter((r) => r.top < 140 && r.height > 0)
+    .filter((el) => el.getBoundingClientRect().top < 140
+      && el.getBoundingClientRect().height > 0)
     .pop();
-  const t = leaf(tt), c = leaf(st);
-  if (!t || !c) return { found: false, title: Boolean(t), chip: Boolean(c) };
+  const titleEl = leaf(tt), chipEl = leaf(st);
+  if (!titleEl || !chipEl) {
+    return { found: false, title: Boolean(titleEl), chip: Boolean(chipEl) };
+  }
+  const t = titleEl.getBoundingClientRect();
+  const c = chipEl.getBoundingClientRect();
+
+  /**
+   * The assertion that matters. `numberOfLines={1}` does not shrink the title
+   * when it runs out of room -- it ELLIPSISES it, so the box stays exactly as
+   * wide as its container while the words are cut. Measuring the box therefore
+   * proves nothing at all, which is why the earlier check ("not squeezed to
+   * nothing") passed while the real question went unasked.
+   *
+   * scrollWidth is the width the text WANTS; clientWidth is what it got. A gap
+   * between them is text the operator cannot read.
+   */
+  const overflow = titleEl.scrollWidth - titleEl.clientWidth;
+
+  // The gear is the last header control; it fixes the true right margin.
+  const gear = [...document.querySelectorAll('[role="button"]')]
+    .map((el) => ({ el, r: el.getBoundingClientRect() }))
+    .filter(({ r }) => r.top < 140 && r.width > 20 && r.width < 60)
+    .pop();
+
   return {
     found: true,
     titleRight: Math.round(t.right),
     chipLeft: Math.round(c.left),
     titleClipped: t.width < 8,
+    titleOverflow: overflow,
+    titleWanted: titleEl.scrollWidth,
+    titleGot: titleEl.clientWidth,
+    // Gap between the name pill's text and the title's right edge.
+    gapToTitle: Math.round(c.left - t.right),
     chipRight: Math.round(window.innerWidth - c.right),
+    gearRight: gear ? Math.round(window.innerWidth - gear.r.right) : null,
+    gearSize: gear ? Math.round(gear.r.width) : null,
+    // The two must be visibly apart, which is the whole point of splitting them.
+    gearGapFromName: gear ? Math.round(gear.r.left - c.right) : null,
   };
 }, [titleText, shopText]);
 
@@ -497,11 +531,13 @@ for (const lang of LANGS) {
   if (box.found) {
     check(`${lang.code}: they do not overlap`, box.chipLeft >= box.titleRight, box);
     check(`${lang.code}: the title is not squeezed to nothing`, !box.titleClipped, box);
-    /* 60px, not 20: what is measured is the NAME text inside the pill, and the
-       pill carries its own right padding plus the gear icon. Tightening this
-       to the pill's own edge would mean matching on a class, which is exactly
-       the kind of assertion that breaks on a restyle without a bug. */
-    check(`${lang.code}: the chip is hard against the right edge`, box.chipRight <= 60, box);
+    // The one that actually catches a cut-off title.
+    check(`${lang.code}: the screen title is not ellipsised`, box.titleOverflow <= 1, box);
+    check(`${lang.code}: the gear is a real 36px target, not a 15px glyph`,
+      box.gearSize >= 34, box);
+    check(`${lang.code}: the name and the gear are visibly separate`,
+      box.gearGapFromName >= 8, box);
+    check(`${lang.code}: the gear sits against the right edge`, box.gearRight <= 20, box);
   }
   await page.screenshot({ path: `${SHOT}/header-${lang.code}.png` });
 }

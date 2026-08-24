@@ -185,6 +185,7 @@ export default {
     title: 'સેટિંગ',
     subtitle: 'તમારી દુકાન',
     since: '{{date}} થી',
+    openHint: 'સેટિંગ ખોલે છે',
     accountGroup: 'ખાતું',
     appGroup: 'એપ',
     aboutGroup: 'માહિતી',

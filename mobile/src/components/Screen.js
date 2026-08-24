@@ -124,24 +124,49 @@ export default function Screen({
           {right}
 
           {canOpenSettings ? (
-            /* maxWidth rather than flex: a long shop name must give way to the
-               screen title, not the other way round -- the title is what tells
-               the operator where they are. */
-            <Pressable
-              onPress={() => navigation.navigate('Settings')}
-              className="ml-1 flex-row items-center rounded-full bg-white/15 py-1.5 pl-3 pr-2 active:bg-white/25"
-              accessibilityRole="button"
-              accessibilityLabel={`${t('settings.title')} — ${business.name}`}
-            >
-              <Text
-                className="text-xs font-bold text-white"
-                numberOfLines={1}
-                style={{ maxWidth: 104 }}
+            /**
+             * Two controls, not one pill. Merged, the name and the gear read as
+             * a single odd-looking badge and neither is big enough to be
+             * confident about -- the gear in particular was 15px, below the
+             * size an icon needs to be recognised rather than guessed at.
+             *
+             * Both still lead to Settings. Splitting them is a visual change,
+             * so making the name inert would have quietly removed the
+             * affordance people had learned; two adjacent targets for one
+             * destination also gives the thumb more to aim at.
+             *
+             * maxWidth rather than flex on the name: a long shop name must give
+             * way to the screen title, not the other way round -- the title is
+             * what tells the operator where they are, and the full name is on
+             * the Settings screen one tap away.
+             */
+            <>
+              <Pressable
+                onPress={() => navigation.navigate('Settings')}
+                className="ml-1.5 rounded-full bg-white/15 px-3 py-1.5 active:bg-white/25"
+                accessibilityRole="button"
+                accessibilityLabel={business.name}
+                accessibilityHint={t('settings.openHint')}
               >
-                {business.name}
-              </Text>
-              <Ionicons name="settings-outline" size={15} color="#FFFFFF" style={{ marginLeft: 5 }} />
-            </Pressable>
+                <Text
+                  className="text-sm font-bold text-white"
+                  numberOfLines={1}
+                  style={{ maxWidth: 96 }}
+                >
+                  {business.name}
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => navigation.navigate('Settings')}
+                hitSlop={6}
+                className="ml-2 h-9 w-9 items-center justify-center rounded-full bg-white/15 active:bg-white/25"
+                accessibilityRole="button"
+                accessibilityLabel={t('settings.title')}
+              >
+                <Ionicons name="settings-outline" size={20} color="#FFFFFF" />
+              </Pressable>
+            </>
           ) : null}
 
           {!canOpenSettings && showLogout && token ? (
