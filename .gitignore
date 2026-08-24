@@ -1,0 +1,23 @@
+# Dependencies (reinstalled from each package-lock.json)
+node_modules/
+
+# Secrets -- committed .env files have ended careers. The template that IS
+# committed is backend/.env.example.
+.env
+.env.local
+*.env
+
+# Build output
+backend/dist/
+mobile/dist/
+mobile/.expo/
+mobile/android/
+mobile/ios/
+
+# Logs and OS noise
+*.log
+npm-debug.log*
+.DS_Store
+
+# Scratch folder for files parked instead of deleted (safe to remove)
+_to_delete/
