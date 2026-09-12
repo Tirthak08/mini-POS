@@ -13,7 +13,17 @@ const orderItemSchema = new mongoose.Schema(
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
     name: { type: String, required: true, trim: true },
     qty: { type: Number, required: true, min: [1, 'Quantity must be at least 1'] },
-    price: { type: Number, required: true, min: 0 },   // unit price at sale time
+    price: { type: Number, required: true, min: 0 },   // unit price ACTUALLY charged
+    /**
+     * What the catalogue said this cost at the moment of sale.
+     *
+     * Without it, a line sold above or below the shelf price is
+     * indistinguishable from one sold at a price that has since changed --
+     * and "did we collect more than we list?" becomes unanswerable after the
+     * fact. Optional so receipts written before overrides existed still load;
+     * readers fall back to `price`.
+     */
+    listPrice: { type: Number, min: 0 },
     cost: { type: Number, default: 0, min: 0 },        // unit COGS at sale time -> profit reports
     discount: { type: Number, default: 0, min: [0, 'Discount cannot be negative'] }, // absolute INR off this line
     lineTotal: { type: Number, required: true, min: 0 }, // qty * price - discount, clamped at 0

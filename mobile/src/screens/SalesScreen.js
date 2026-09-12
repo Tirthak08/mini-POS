@@ -23,6 +23,7 @@ import { formatINR, formatDate, round2 } from '../utils/money';
 import { shareReceipt } from '../utils/receipt';
 import { resolveRange, DEFAULT_PRESET } from '../utils/dateRange';
 import { colors } from '../theme';
+import { useScrollTopOnFocus } from '../hooks/useScrollTopOnFocus';
 
 /** The server sends receiptNo; this is the fallback so text and labels agree. */
 const receiptLabel = (order) =>
@@ -45,6 +46,7 @@ export default function SalesScreen() {
   // 'sales' | 'expenses'. One period filter serves both, so the two halves of
   // the same month can never disagree about which month they mean.
   const [segment, setSegment] = useState('sales');
+  const listRef = useScrollTopOnFocus();
   const [orders, setOrders] = useState([]);
   const [pagination, setPagination] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -130,6 +132,9 @@ export default function SalesScreen() {
         productId: String(i.productId),
         name: i.name,
         price: i.price,
+        // What the catalogue said on the day of the sale. Older receipts
+        // predate the field, so the charged price stands in for it.
+        listPrice: i.listPrice ?? i.price,
         qty: i.qty,
         discount: i.discount || 0,
       })),
@@ -179,7 +184,12 @@ export default function SalesScreen() {
       const res = await orderApi.update(editing._id, {
         customerName: editing.customerName.trim() || undefined,
         extraCharges: Number(editing.extraCharges) || 0,
-        items: editing.lines.map((l) => ({ productId: l.productId, qty: l.qty, discount: l.discount || 0 })),
+        // price is always sent on an edit: these lines already have a settled
+        // price, and omitting it would let the server fall back to today's
+        // catalogue figure and silently reprice a past sale.
+        items: editing.lines.map((l) => ({
+          productId: l.productId, qty: l.qty, price: l.price, discount: l.discount || 0,
+        })),
       });
       toast.success(`${t('sales.saved')} — ${formatINR(res.order.grandTotal)}`);
       setEditing(null);
@@ -296,6 +306,7 @@ export default function SalesScreen() {
         <Loading label={t('common.loading')} />
       ) : (
         <FlatList
+          ref={listRef}
           data={orders}
           keyExtractor={(item) => String(item._id)}
           renderItem={renderOrder}
@@ -359,6 +370,14 @@ export default function SalesScreen() {
                         {formatINR(line.price)} × {line.qty}
                         {line.discount > 0 ? ` · ${t('pos.discount')} ${formatINR(line.discount)}` : ''}
                       </Text>
+                      {/* A line sold off-list is called out, so the receipt
+                          explains itself months later. Receipts written before
+                          listPrice existed have nothing to compare against. */}
+                      {line.listPrice != null && round2(line.listPrice) !== round2(line.price) ? (
+                        <Text className="mt-0.5 text-xs text-amber-600">
+                          {t('pos.listPrice')} {formatINR(line.listPrice)}
+                        </Text>
+                      ) : null}
                     </View>
                   ))}
 
@@ -484,6 +503,33 @@ export default function SalesScreen() {
                             accessibilityLabel={`${t('pos.itemDiscount')} ${line.name}`}
                           />
                         </View>
+                      </View>
+
+                      {/* The unit price, editable -- this is how a mis-keyed
+                          amount gets corrected after the sale. patchLine
+                          re-clamps the discount, because lowering the price can
+                          leave a discount bigger than the line is now worth. */}
+                      <View className="mt-2 flex-row items-center">
+                        <Text className="mr-2 w-[76px] text-xs text-slate-500">
+                          {t('pos.unitPrice')}
+                        </Text>
+                        <View className="flex-1">
+                          <TextField
+                            value={String(line.price)}
+                            onChangeText={(v) => patchLine(line.productId, {
+                              price: Math.max(0, Number(v) || 0),
+                            })}
+                            mode="money"
+                            prefix="₹"
+                            className="mb-0"
+                            accessibilityLabel={`${t('pos.unitPrice')} ${line.name}`}
+                          />
+                        </View>
+                        {line.listPrice != null && round2(line.listPrice) !== round2(line.price) ? (
+                          <Text className="ml-2 text-xs text-amber-600">
+                            {t('pos.listPrice')} {formatINR(line.listPrice)}
+                          </Text>
+                        ) : null}
                       </View>
                     </View>
                   );

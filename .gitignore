@@ -21,3 +21,7 @@ npm-debug.log*
 
 # Scratch folder for files parked instead of deleted (safe to remove)
 _to_delete/
+
+# Files Claude delivers into the conversation land here. They are screenshots
+# and one-off outputs, not project source.
+Claude outputs/

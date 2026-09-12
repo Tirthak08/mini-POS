@@ -13,8 +13,24 @@ let txnSupported = null;
 
 /**
  * Turns the client cart into trusted line items.
- * Prices, costs and names ALWAYS come from the database -- a tampered request
- * body claiming price: 1 for a 500-rupee item cannot change what is charged.
+ *
+ * Names and COSTS always come from the database. Cost decides reported profit
+ * and must never be settable by a request body, or margins become fiction.
+ *
+ * PRICE is different, and deliberately so. A shop sells the same item above or
+ * below the shelf price all the time -- a haggled rate, a damaged tin, a
+ * regular getting a discount, or the shopkeeper simply collecting more than
+ * the catalogue says. Refusing that forced the operator to go and edit the
+ * product, sell, then edit it back, which is worse in every way: it rewrites
+ * the catalogue for a one-off and leaves the wrong price live in between.
+ *
+ * So an explicit per-line `price` is honoured, and this is not the security
+ * hole it first looks like. The token already authenticates the SHOP owner,
+ * who can set any price they like through PATCH /products; the override adds
+ * no capability they did not have. What it must not do is destroy the record,
+ * so every line keeps `listPrice` -- the catalogue price at that moment --
+ * alongside what was actually charged. A sale above or below list is then
+ * visible rather than indistinguishable from a repricing.
  */
 async function buildLines(businessId, rawItems) {
   if (!Array.isArray(rawItems) || rawItems.length === 0) {
@@ -23,15 +39,32 @@ async function buildLines(businessId, rawItems) {
   if (rawItems.length > 200) throw ApiError.badRequest('Too many line items in one order');
 
   // The same product tapped twice becomes one line, so stock maths stays right.
+  //
+  // Merging on productId ALONE is deliberate even now that lines carry a price.
+  // Keeping two lines for one product would need the stock guard to reason
+  // across them -- each `stock: {$gte: qty}` check would pass on its own while
+  // the pair oversold. The cart never produces two lines for one product
+  // anyway (adding an existing item bumps its quantity), so the last price
+  // given wins and the guard stays sound.
   const merged = new Map();
   for (const [i, raw] of rawItems.entries()) {
     const productId = assertObjectId(raw?.productId, `items[${i}].productId`);
     const qty = toCount(raw?.qty ?? 1, `items[${i}].qty`, { required: true, min: 1, max: 100_000 });
     const discount = toAmount(raw?.discount, `items[${i}].discount`);
+    // undefined means "charge the catalogue price"; 0 is a legitimate giveaway
+    // and must not be confused with it.
+    const price = raw?.price === undefined || raw?.price === null || raw?.price === ''
+      ? undefined
+      : toAmount(raw.price, `items[${i}].price`);
     const prev = merged.get(productId);
     merged.set(productId, prev
-      ? { productId, qty: prev.qty + qty, discount: round2(prev.discount + discount) }
-      : { productId, qty, discount });
+      ? {
+        productId,
+        qty: prev.qty + qty,
+        discount: round2(prev.discount + discount),
+        price: price ?? prev.price,
+      }
+      : { productId, qty, discount, price });
   }
 
   const ids = [...merged.keys()];
@@ -54,15 +87,20 @@ async function buildLines(businessId, rawItems) {
       outOfStock.push({ productId: cart.productId, name: p.name, requested: cart.qty, available: p.stock });
       continue;
     }
-    const gross = round2(p.price * cart.qty);
+    const listPrice = p.price;
+    const price = cart.price ?? listPrice;
+    const gross = round2(price * cart.qty);
     // PRD 7, edge case 2: a discount can never exceed the line's own value,
     // so a line total -- and therefore the order total -- can never go negative.
+    // Note it clamps against the OVERRIDDEN gross, so dropping the price also
+    // shrinks the largest discount that line can carry.
     const discount = Math.min(cart.discount, gross);
     lines.push({
       productId: p._id,
       name: p.name,
       qty: cart.qty,
-      price: p.price,
+      price,
+      listPrice,
       cost: p.cost ?? 0,
       discount,
       lineTotal: round2(gross - discount),
@@ -178,6 +216,11 @@ export async function checkout(req, res) {
  * snapshot: a correction to a quantity must not silently reprice a past sale
  * because the product's price changed since. Genuinely new lines are priced at
  * today's price, from the database.
+ *
+ * An explicit `price` on a line overrides both -- that is how a mis-keyed
+ * amount gets corrected after the fact. `listPrice` is preserved from the
+ * snapshot where there is one, because it records what the catalogue said on
+ * the day of the SALE, not the day of the correction.
  */
 async function rebuildLines(businessId, rawItems, order) {
   if (!Array.isArray(rawItems) || rawItems.length === 0) {
@@ -194,10 +237,18 @@ async function rebuildLines(businessId, rawItems, order) {
     const productId = assertObjectId(raw?.productId, `items[${i}].productId`);
     const qty = toCount(raw?.qty ?? 1, `items[${i}].qty`, { required: true, min: 1, max: 100_000 });
     const discount = toAmount(raw?.discount, `items[${i}].discount`);
+    const price = raw?.price === undefined || raw?.price === null || raw?.price === ''
+      ? undefined
+      : toAmount(raw.price, `items[${i}].price`);
     const prev = merged.get(productId);
     merged.set(productId, prev
-      ? { productId, qty: prev.qty + qty, discount: round2(prev.discount + discount) }
-      : { productId, qty, discount });
+      ? {
+        productId,
+        qty: prev.qty + qty,
+        discount: round2(prev.discount + discount),
+        price: price ?? prev.price,
+      }
+      : { productId, qty, discount, price });
   }
 
   // Only products that were NOT already on the receipt need looking up.
@@ -217,9 +268,13 @@ async function rebuildLines(businessId, rawItems, order) {
   for (const cart of merged.values()) {
     const snapshot = original.get(cart.productId);
     const source = snapshot ?? byId.get(cart.productId);
-    const price = snapshot ? snapshot.price : source.price;
+    const snapshotPrice = snapshot ? snapshot.price : source.price;
+    const price = cart.price ?? snapshotPrice;
     const cost = snapshot ? snapshot.cost : (source.cost ?? 0);
     const name = snapshot ? snapshot.name : source.name;
+    // What the catalogue said when this line was first sold. For a line added
+    // during the correction there is no such history, so today's price is it.
+    const listPrice = snapshot ? (snapshot.listPrice ?? snapshot.price) : source.price;
 
     const gross = round2(price * cart.qty);
     const discount = Math.min(cart.discount, gross); // PRD 7, edge case 2
@@ -228,6 +283,7 @@ async function rebuildLines(businessId, rawItems, order) {
       name,
       qty: cart.qty,
       price,
+      listPrice,
       cost,
       discount,
       lineTotal: round2(gross - discount),

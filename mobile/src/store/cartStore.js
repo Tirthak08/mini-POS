@@ -11,13 +11,32 @@ import { round2 } from '../utils/money';
  * nothing about what is actually charged.
  */
 
-const clampDiscount = (item) => Math.min(item.discount ?? 0, round2(item.qty * item.price));
+/**
+ * What this line actually charges.
+ *
+ * `price` is the catalogue price, frozen when the item entered the cart.
+ * `priceOverride` is what the operator typed instead -- null when they have
+ * not. They are kept apart rather than one field being mutated so the row can
+ * still show what the shelf says, and so clearing the override restores it
+ * without another lookup.
+ *
+ * `?? ` and not `||`: a giveaway at zero is a real thing a shop does, and `||`
+ * would silently fall back to the catalogue price for exactly that case.
+ */
+export const unitPrice = (item) => (item.priceOverride ?? item.price ?? 0);
 
-export const lineGross = (item) => round2(item.qty * item.price);
+/** True when the operator has priced this line by hand. */
+export const isRepriced = (item) =>
+  item.priceOverride != null && round2(item.priceOverride) !== round2(item.price);
+
+const clampDiscount = (item) => Math.min(item.discount ?? 0, round2(item.qty * unitPrice(item)));
+
+export const lineGross = (item) => round2(item.qty * unitPrice(item));
 export const lineTotal = (item) => round2(Math.max(0, lineGross(item) - clampDiscount(item)));
 
 export const useCartStore = create((set, get) => ({
-  items: [], // [{ productId, name, price, cost, stock, qty, discount }]
+  // [{ productId, name, price, priceOverride, cost, stock, qty, discount }]
+  items: [],
   customerName: '',
   extraCharges: 0,
 
@@ -49,6 +68,7 @@ export const useCartStore = create((set, get) => ({
           imageUrl: product.imageUrl ?? null,
           qty: 1,
           discount: 0,
+          priceOverride: null,
         },
       ],
     });
@@ -88,6 +108,28 @@ export const useCartStore = create((set, get) => ({
       }),
     }),
 
+  /**
+   * Price this line by hand for this sale only.
+   *
+   * Passing '' or null clears the override and the catalogue price comes back.
+   * Changing the price can leave a previously valid discount larger than the
+   * line is now worth, so it re-clamps -- the same trap that let the operator
+   * see a discount the server would silently reduce on save.
+   */
+  setPriceOverride: (productId, value) =>
+    set({
+      items: get().items.map((i) => {
+        if (i.productId !== productId) return i;
+        const cleared = value === '' || value === null || value === undefined;
+        const parsed = Number(value);
+        const next = {
+          ...i,
+          priceOverride: cleared || !Number.isFinite(parsed) ? null : Math.max(0, round2(parsed)),
+        };
+        return { ...next, discount: clampDiscount(next) };
+      }),
+    }),
+
   setCustomerName: (customerName) => set({ customerName }),
   setExtraCharges: (value) => set({ extraCharges: Math.max(0, Number(value) || 0) }),
 
@@ -99,7 +141,14 @@ export const useCartStore = create((set, get) => ({
     return {
       customerName: customerName.trim() || undefined,
       extraCharges: extraCharges || 0,
-      items: items.map((i) => ({ productId: i.productId, qty: i.qty, discount: i.discount || 0 })),
+      items: items.map((i) => ({
+        productId: i.productId,
+        qty: i.qty,
+        discount: i.discount || 0,
+        // Omitted entirely when untouched, so the server prices from the
+        // catalogue and the receipt records no override.
+        ...(i.priceOverride != null && { price: i.priceOverride }),
+      })),
     };
   },
 }));

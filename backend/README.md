@@ -25,8 +25,10 @@ IP-allow-list and auth failures with a hint for each.
 ## Tests
 
 ```bash
-npm test                  # 263 assertions against a real MongoDB replica set
+npm test                  # 266 assertions against a real MongoDB replica set
 npm run test:expenses     #  49 — expenses, tenant isolation, and profit arithmetic
+npm run test:pricing      #  39 — duplicate names, and pricing a sale off-list
+npm run test:images       #  22 — an image is really removed when it stops being used
 npm run test:clamp        #  11 — discounts can never make a line negative
 npm run test:standalone   #   6 — proves the no-transaction fallback path
 npm run test:ratelimit    #   6 — proves per-account brute-force protection
@@ -187,6 +189,19 @@ only that account, while another shop on the same IP signs in unaffected.
 Numeric strings from React Native `TextInput` are coerced. Negative prices and
 fractional stock are 400s.
 
+**Names are unique within a category.** One shop may not stock two products called
+"Rice 5kg" under Grain; the same name under a different category is fine, and so is the
+same name at a different shop. Matching is case-insensitive and collapses runs of
+whitespace, because "rice 5kg" and "Rice&nbsp;&nbsp;5kg" are how duplicates actually get
+in. Deleting a product frees its name. A clash returns **409** naming the product, from a
+partial unique index — the check *is* the insert, so two phones adding the same product at
+the same moment cannot both win.
+
+An existing database may already hold duplicates, and a unique index cannot be built over
+data that violates it — the build fails, the error goes to the connection handler, and the
+app carries on accepting duplicates with nothing to show for it. Run `npm run db:dupes` to
+list them, or `npm run db:dupes -- --fix` to rename the extras, then restart the API.
+
 ### Orders
 | Method | Path | Notes |
 |---|---|---|
@@ -216,12 +231,33 @@ a forgotten item.
 
 Checkout guarantees:
 
-- **Prices come from the database.** A body claiming `price: 1` for a ₹500 item changes nothing.
+- **Names and costs come from the database.** A body claiming `name: "Hacked"` or `cost: 0`
+  changes nothing. Cost in particular decides reported profit, so a client that could set it
+  could report any margin it liked.
+- **Price MAY be set per line**, and deliberately so — a shop sells above or below the shelf
+  price constantly (a haggled rate, a damaged tin, an over-collection). Send `price` on a line
+  and that is what is charged; omit it and the catalogue price applies. This grants no new
+  capability: the token already authenticates the owner, who can `PATCH /api/products` to any
+  price. Every line records `listPrice` — what the catalogue said at that moment — so a sale
+  off-list stays distinguishable from one made before a repricing.
 - **Discounts are clamped** to each line's own value, so no line — and no order — can go negative.
 - **Stock decrements are atomic** (`{stock: {$gte: qty}}` in the update filter). Five phones checking out the last unit produce exactly one sale and four 409s; stock lands on 0, never −4.
 - **Receipt numbers are gapless and unique per shop**, reserved inside the transaction so a rolled-back sale does not burn one.
 - Transactional on Atlas; on a standalone `mongod` it falls back to compensating writes that roll back partial decrements.
 - The same product added twice merges into one line, so the stock maths stays right.
+
+**Image bytes are reclaimed, not soft-deleted.** Everything else the shop can
+remove is flagged and kept so it can come back; a photo is the exception,
+because the bytes *are* the row and nothing in the app restores a single
+picture. So replacing a photo, clearing it, deleting the product, and
+`DELETE /api/images/:id` all remove it outright. Abandoned uploads — a "New
+product" form opened, photographed and then cancelled — are swept on the next
+upload once they are a day old.
+
+Archiving a whole business is the one path that still soft-deletes images,
+because archive is built to be undone; `restore` brings the photos back and
+`purge` reclaims them. `npm run db:images` reports what an older build left
+behind, and `-- --fix` reclaims it.
 
 ### Expenses
 | Method | Path | Notes |

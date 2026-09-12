@@ -235,8 +235,10 @@ Backend (`cd backend`):
 
 | Command | Assertions | Covers |
 |---|---|---|
-| `npm test` | 263 | The whole API against a real MongoDB |
+| `npm test` | 266 | The whole API against a real MongoDB |
 | `npm run test:expenses` | 49 | Expenses: validation, backdating, tenant isolation, and what they do to profit |
+| `npm run test:images` | 22 | Image bytes are freed on replace, clear and product delete; archive stays reversible |
+| `npm run test:pricing` | 39 | Duplicate product names, and selling above or below the catalogue price |
 | `npm run test:clamp` | 11 | Discount clamping on a direct model write |
 | `npm run test:ratelimit` | 6 | Per-account and per-IP login throttling |
 | `npm run test:standalone` | 6 | The compensating-write path when transactions are unavailable |
@@ -245,7 +247,10 @@ App (`cd mobile`) — pure logic, no server needed:
 
 | Command | Assertions | Covers |
 |---|---|---|
-| `npm run test:cart` | 28 | Cart maths, discount clamping, the payload sent to the server |
+| `npm run test:cart` | 48 | Cart maths, discount clamping, per-line price overrides, the payload sent to the server |
+| `npm run test:totals` | 25 | Totals rows: rounding once at the end, and a loss shown as a loss |
+| `npm run test:tooltip` | 24 | Chart tooltip placement and labelling — the part of that feature a browser cannot reach |
+| `npm run test:dialog` | 22 | Dialog geometry with a raised keyboard — the part of that bug a browser cannot see |
 | `npm run test:range` | 44 | Date presets, including week/month/year boundaries and leap years |
 | `npm run test:age` | 10 | "3 min ago" formatting for the staleness banner |
 | `npm run test:hydration` | 16 | The splash gate: no flash of the sign-in screen, and a failsafe if storage hangs |
@@ -267,7 +272,10 @@ cd mobile  && npm i -D playwright && npx playwright install chromium
 | Command | Assertions | Covers |
 |---|---|---|
 | `npm run test:dropdown` | 361 | Every filter option in all three languages: full labels, no clipping, correct queries |
-| `npm run test:settings` | 65 | Centred dialogs (measured), Settings, rename, PIN change, expenses end to end, and the header in all three languages |
+| `npm run test:settings` | 74 | Centred dialogs (measured), Settings, rename, PIN change, expenses end to end, and the header in all three languages |
+| `npm run test:detail` | 26 | Scroll reset on tab switch, export preview, and the category/product detail lists |
+| `npm run test:reports` | 12 | Reports refreshes on return and on pull, without blanking the figures |
+| `npm run test:fixes` | 30 | Centred dropdown, duplicate names refused inline, price changed at the till |
 | `npm run test:offline` | 31 | The cache survives a restart, is labelled stale, and never crosses tenants |
 | `npm run test:receipt` | 28 | The customer receipt: the order's own numbers, all three languages, HTML-injection safety |
 | `npm run test:network` | 13 | Cold-start waking, GET-only retry, and which failure message the operator sees |

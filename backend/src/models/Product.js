@@ -21,6 +21,15 @@ const productSchema = new mongoose.Schema(
       required: [true, 'Product name is required'],
       trim: true,
       maxlength: 80,
+      /**
+       * Collapse runs of whitespace, not just the ends.
+       *
+       * The uniqueness index below compares strings, and a collation can fold
+       * case and accents but not "Rice  5kg" against "Rice 5kg". Without this,
+       * a double space typed by accident creates a second product that looks
+       * identical in the list -- which is one of the ways duplicates got in.
+       */
+      set: (v) => (typeof v === 'string' ? v.trim().replace(/\s+/g, ' ') : v),
     },
     price: {
       type: Number,
@@ -51,6 +60,32 @@ productSchema.plugin(softDeletePlugin);
 
 productSchema.index({ businessId: 1, categoryId: 1, deletedAt: 1 }); // POS category filter
 productSchema.index({ businessId: 1, name: 1, deletedAt: 1 });       // inventory search
+
+/**
+ * One shop may not stock two products of the same name in the same category.
+ *
+ * Scoped to the CATEGORY, not the whole shop: "Rice 5kg" under Grain and the
+ * same name under a Festival Offers category is a legitimate thing to want,
+ * and forbidding it would be a surprise. Two of them side by side in one
+ * category is always a mistake -- the operator cannot tell which is which at
+ * the till.
+ *
+ * Partial, so deleting a product frees its name for reuse; the soft-delete
+ * plugin stamps deletedAt rather than removing the row, and without the filter
+ * a deleted "Rice 5kg" would block ever creating that name again.
+ *
+ * Collation strength 2 makes it case- and accent-insensitive, so "rice 5kg"
+ * is caught as the duplicate it is. Queries that need this index must use the
+ * same collation -- listProducts already does.
+ */
+productSchema.index(
+  { businessId: 1, categoryId: 1, name: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { deletedAt: null },
+    collation: { locale: 'en', strength: 2 },
+  }
+);
 
 /** Profit per unit -- for the Revenue vs Profit chart (PRD 6, screen 3). */
 productSchema.virtual('margin').get(function margin() {

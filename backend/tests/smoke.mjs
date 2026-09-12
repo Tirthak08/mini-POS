@@ -370,11 +370,27 @@ try {
       clamp.body?.order);
     check('grandTotal never goes below zero', clamp.body?.order?.grandTotal === 0, clamp.body?.order);
 
+    /**
+     * This assertion used to read "client-supplied price/name are ignored".
+     * Price is now deliberately honoured -- a shop sells above or below the
+     * shelf price constantly, and forcing them to edit the product and edit it
+     * back was worse. It is not a new capability: the token already
+     * authenticates the owner, who can PATCH the product to any price.
+     *
+     * So the line is redrawn rather than removed. NAME and COST must still be
+     * unforgeable -- cost decides reported profit, and a client that could set
+     * it could report any margin it liked -- and the catalogue price has to
+     * survive on the record as listPrice.
+     */
     const tampered = await api('POST', '/orders', {
       token: tokenA,
       body: { items: [{ productId: pTea, qty: 1, price: 1, name: 'Hacked', cost: 0 }] },
     });
-    check('client-supplied price/name are ignored; DB price used', tampered.status === 201 && tampered.body.order.items[0].price === 15 && tampered.body.order.items[0].name === 'Masala Chai', tampered.body?.order?.items);
+    const tLine = tampered.body?.order?.items?.[0];
+    check('an explicit price IS honoured', tampered.status === 201 && tLine?.price === 1, tLine);
+    check('but the name still comes from the database', tLine?.name === 'Masala Chai', tLine);
+    check('and cost is never client-settable, or profit becomes fiction', tLine?.cost === 6, tLine);
+    check('the catalogue price is preserved as listPrice', tLine?.listPrice === 15, tLine);
 
     const prevNo = tampered.body?.order?.orderNumber;
     const second = await api('POST', '/orders', { token: tokenA, body: { items: [{ productId: pChips, qty: 1 }] } });

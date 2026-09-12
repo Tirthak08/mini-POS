@@ -2,7 +2,11 @@ import * as XLSX from 'xlsx';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import { File, Paths } from 'expo-file-system';
+import { Platform } from 'react-native';
 import { formatINR, formatDate } from './money';
+import {
+  orderTotals, itemTotals, expenseTotals, topProductTotals, summaryTotals,
+} from './reportTotals';
 
 /**
  * IMPORTANT -- expo-file-system 19 (SDK 54) API.
@@ -27,6 +31,49 @@ async function share(uri, mimeType, dialogTitle) {
   }
   await Sharing.shareAsync(uri, { mimeType, dialogTitle, UTI: mimeType });
   return uri;
+}
+
+/**
+ * Writes the file into a folder the shopkeeper picks, instead of handing it to
+ * the share sheet.
+ *
+ * Sharing can already reach Files and Drive, so this is not a new capability --
+ * but "Share" is the wrong word for what most people want, which is a copy on
+ * the phone they can find again later, and several taps deep in a share sheet
+ * is not where they look for it.
+ *
+ * Android only. The Storage Access Framework is what lets an app write outside
+ * its own sandbox, and it exists only there; on iOS the Files app reaches the
+ * same place through the share sheet, so that is what this falls back to
+ * rather than pretending to have saved somewhere it has not.
+ */
+async function saveToDevice(uri, mimeType, filename, dialogTitle) {
+  if (Platform.OS !== 'android') return share(uri, mimeType, dialogTitle);
+
+  // Imported lazily and from the legacy entry point on purpose: SAF is not part
+  // of the new File/Paths API, and the deprecated shims on the MAIN import
+  // throw at runtime. Loading it only when a save is actually requested keeps
+  // that decision out of the app's startup path.
+  const legacy = await import('expo-file-system/legacy');
+  const saf = legacy.StorageAccessFramework;
+
+  const permission = await saf.requestDirectoryPermissionsAsync();
+  if (!permission.granted) {
+    // Not an error: declining a folder picker is a decision, not a failure.
+    return null;
+  }
+
+  const target = await saf.createFileAsync(permission.directoryUri, filename, mimeType);
+  const base64 = await new File(uri).base64();
+  await legacy.writeAsStringAsync(target, base64, { encoding: 'base64' });
+  return target;
+}
+
+/** One place that decides what happens to a finished file. */
+async function deliver(uri, { mimeType, filename, dialogTitle, mode = 'share' }) {
+  return mode === 'save'
+    ? saveToDevice(uri, mimeType, filename, dialogTitle)
+    : share(uri, mimeType, dialogTitle);
 }
 
 /** Timestamped so repeated exports do not overwrite each other in the share sheet. */
@@ -56,22 +103,55 @@ export function toCsv(rows, headers) {
   return '﻿' + lines.join('\r\n');
 }
 
-export async function exportCsv(exportPayload) {
+export async function exportCsv(exportPayload, { mode = 'share' } = {}) {
   const { items = [], business, range } = exportPayload;
   if (!items.length) throw new Error('Nothing to export in this period');
 
+  const t = itemTotals(items);
+  // Keyed to match the item rows so the values land under the right columns.
+  const totalsRow = {
+    receiptNo: 'TOTAL',
+    orderId: '',
+    date: '',
+    customer: `${t.count} lines`,
+    product: '',
+    qty: t.qty,
+    unitPrice: '',
+    discount: t.discount,
+    lineTotal: t.lineTotal,
+    unitCost: '',
+    lineProfit: t.lineProfit,
+  };
+
   const filename = `${slug(business?.name)}-sales-${stamp()}.csv`;
-  const uri = writeCacheFile(filename, toCsv(items));
-  return share(uri, 'text/csv', `Sales ${formatDate(range?.from)} - ${formatDate(range?.to)}`);
+  const uri = writeCacheFile(filename, toCsv(items, undefined, totalsRow));
+  return deliver(uri, {
+    mimeType: 'text/csv',
+    filename,
+    dialogTitle: `Sales ${formatDate(range?.from)} - ${formatDate(range?.to)}`,
+    mode,
+  });
 }
 
 /* ------------------------------ Excel ------------------------------ */
 
-export async function exportExcel(exportPayload) {
+export async function exportExcel(exportPayload, { mode = 'share' } = {}) {
   const { orders = [], items = [], expenses = [], totals, business, range } = exportPayload;
   if (!orders.length) throw new Error('Nothing to export in this period');
 
   const workbook = XLSX.utils.book_new();
+
+  /**
+   * Appends a TOTAL row beneath a sheet's data.
+   *
+   * `origin: -1` means "the row after the last one", so this stays correct
+   * however many rows the period happens to hold. A blank row goes in first:
+   * without it the total looks like one more order, and a reader scanning the
+   * column sees the grand total as a transaction.
+   */
+  const appendTotals = (sheet, row) => {
+    XLSX.utils.sheet_add_aoa(sheet, [[], row], { origin: -1 });
+  };
 
   // Sheet 1: one row per order
   const orderSheet = XLSX.utils.json_to_sheet(
@@ -93,6 +173,11 @@ export async function exportExcel(exportPayload) {
     { wch: 26 }, { wch: 20 }, { wch: 18 }, { wch: 7 }, { wch: 7 },
     { wch: 11 }, { wch: 10 }, { wch: 13 }, { wch: 11 }, { wch: 10 }, { wch: 10 },
   ];
+  const ot = orderTotals(orders);
+  appendTotals(orderSheet, [
+    'TOTAL', `${ot.count} orders`, '', ot.items, ot.units,
+    ot.subtotal, ot.discount, ot.extraCharges, ot.grandTotal, ot.cogs, ot.profit,
+  ]);
   XLSX.utils.book_append_sheet(workbook, orderSheet, 'Orders');
 
   // Sheet 2: one row per line item, for pivoting by product
@@ -114,6 +199,10 @@ export async function exportExcel(exportPayload) {
     { wch: 26 }, { wch: 20 }, { wch: 18 }, { wch: 24 }, { wch: 6 },
     { wch: 11 }, { wch: 10 }, { wch: 11 }, { wch: 10 }, { wch: 11 },
   ];
+  const lt = itemTotals(items);
+  appendTotals(itemSheet, [
+    'TOTAL', `${lt.count} lines`, '', '', lt.qty, '', lt.discount, lt.lineTotal, '', lt.lineProfit,
+  ]);
   XLSX.utils.book_append_sheet(workbook, itemSheet, 'Line items');
 
   /* Sheet 3: expenses. Its own sheet rather than extra order rows -- an
@@ -129,6 +218,8 @@ export async function exportExcel(exportPayload) {
       }))
     );
     expenseSheet['!cols'] = [{ wch: 20 }, { wch: 40 }, { wch: 12 }];
+    const et = expenseTotals(expenses);
+    appendTotals(expenseSheet, ['TOTAL', `${et.count} entries`, et.amount]);
     XLSX.utils.book_append_sheet(workbook, expenseSheet, 'Expenses');
   }
 
@@ -160,11 +251,12 @@ export async function exportExcel(exportPayload) {
   const filename = `${slug(business?.name)}-report-${stamp()}.xlsx`;
   const uri = writeCacheFile(filename, base64, { base64: true });
 
-  return share(
-    uri,
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    `Report ${formatDate(range?.from)} - ${formatDate(range?.to)}`
-  );
+  return deliver(uri, {
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    filename,
+    dialogTitle: `Report ${formatDate(range?.from)} - ${formatDate(range?.to)}`,
+    mode,
+  });
 }
 
 /* -------------------------------- PDF -------------------------------- */
@@ -201,6 +293,15 @@ function buildReportHtml({ business, range, totals, summary, orders = [], topPro
     ?? Math.round(expenses.reduce((sum, e) => sum + (e.amount || 0), 0) * 100) / 100;
   const net = summary?.netProfit ?? totals?.netProfit ?? Math.round((gross - expenseTotal) * 100) / 100;
 
+  /**
+   * Totals are computed over the FULL arrays, not the sliced ones rendered
+   * below. A PDF that shows the first 200 orders must still total all of them,
+   * or the bottom line silently understates the period.
+   */
+  const ordTotals = orderTotals(orders);
+  const expTotals = expenseTotals(expenses);
+  const tpTotals = topProductTotals(topProducts);
+
   const expenseRows = expenses.slice(0, 200).map((e) => `
     <tr>
       <td>${esc(formatDate(e.date))}</td>
@@ -230,6 +331,9 @@ function buildReportHtml({ business, range, totals, summary, orders = [], topPro
   .pos { color: #16A34A; }
   .neg { color: #DC2626; }
   .foot { margin-top: 26px; font-size: 10px; color: #94A3B8; text-align: center; }
+  /* The totals row. A top rule and a shaded ground separate it from the data
+     above, so nobody reads the grand total as one more transaction. */
+  tfoot td { border-top: 2px solid #CBD5E1; background: #F8FAFC; font-weight: 700; padding: 7px 8px; }
 </style></head>
 <body>
   <h1>${esc(business?.name ?? 'Business')}</h1>
@@ -248,29 +352,62 @@ function buildReportHtml({ business, range, totals, summary, orders = [], topPro
 
   ${top ? `<h2>Top products</h2>
   <table><thead><tr><th>#</th><th>Product</th><th class="num">Qty</th><th class="num">Revenue</th><th class="num">Profit</th></tr></thead>
-  <tbody>${top}</tbody></table>` : ''}
+  <tbody>${top}</tbody>
+  <tfoot><tr>
+    <td></td><td>Total (${tpTotals.count})</td>
+    <td class="num">${tpTotals.qty}</td>
+    <td class="num">${esc(formatINR(tpTotals.revenue))}</td>
+    <td class="num pos">${esc(formatINR(tpTotals.profit))}</td>
+  </tr></tfoot></table>` : ''}
 
   ${expenseRows ? `<h2>Expenses</h2>
   <table><thead><tr><th>Date</th><th>Spent on</th><th class="num">Amount</th></tr></thead>
-  <tbody>${expenseRows}</tbody></table>` : ''}
+  <tbody>${expenseRows}</tbody>
+  <tfoot><tr>
+    <td></td><td>Total (${expTotals.count})</td>
+    <td class="num neg">${esc(formatINR(expTotals.amount))}</td>
+  </tr></tfoot></table>` : ''}
 
   ${rows ? `<h2>Orders</h2>
   <table><thead><tr><th>Date</th><th>Customer</th><th class="num">Units</th><th class="num">Discount</th><th class="num">Total</th></tr></thead>
-  <tbody>${rows}</tbody></table>
+  <tbody>${rows}</tbody>
+  <tfoot><tr>
+    <td></td><td>Total (${ordTotals.count} orders)</td>
+    <td class="num">${ordTotals.units}</td>
+    <td class="num">${esc(formatINR(ordTotals.discount))}</td>
+    <td class="num">${esc(formatINR(ordTotals.grandTotal))}</td>
+  </tr></tfoot></table>
   ${orders.length > 200 ? `<div class="foot">Showing the first 200 of ${orders.length} orders. Use the Excel export for the full list.</div>` : ''}` : ''}
 
   <div class="foot">Generated ${esc(formatDate(new Date(), { withTime: true }))} &middot; Vyapaar</div>
 </body></html>`;
 }
 
-export async function exportPdf(payload) {
+export async function exportPdf(payload, { mode = 'share' } = {}) {
   if (!payload?.orders?.length) throw new Error('Nothing to export in this period');
 
   const { uri } = await Print.printToFileAsync({
     html: buildReportHtml(payload),
     base64: false,
   });
-  return share(uri, 'application/pdf', `Report ${formatDate(payload.range?.from)} - ${formatDate(payload.range?.to)}`);
+  const filename = `${slug(payload.business?.name)}-report-${stamp()}.pdf`;
+  return deliver(uri, {
+    mimeType: 'application/pdf',
+    filename,
+    dialogTitle: `Report ${formatDate(payload.range?.from)} - ${formatDate(payload.range?.to)}`,
+    mode,
+  });
+}
+
+/**
+ * The report's HTML, for showing on screen before it is sent anywhere.
+ *
+ * Exported so the preview renders the SAME markup the PDF is made from. A
+ * preview built from a second implementation would eventually disagree with
+ * the file it claims to preview, which is worse than no preview at all.
+ */
+export function reportHtml(payload) {
+  return buildReportHtml(payload);
 }
 
 export const __test__ = { toCsv, csvCell, buildReportHtml, slug };

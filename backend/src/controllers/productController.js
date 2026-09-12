@@ -19,10 +19,39 @@ async function claimImage(businessId, imageId, productId) {
   return image._id;
 }
 
-/** Replacing or clearing a photo retires the old row rather than orphaning it. */
+/**
+ * Replacing or clearing a photo REMOVES the old one, bytes and all.
+ *
+ * This used to soft-delete, which was wrong in a way that only showed up as a
+ * slowly filling database. Soft delete exists so a row can come back -- but
+ * nothing can ever reference this one again: the product's imageId has already
+ * moved on, and the admin restore is scoped to `deletedBy`, so a row retired
+ * here would never be resurrected by anything. It was pure dead weight, and
+ * unlike a product or an order that weight is ~60KB of binary each time.
+ *
+ * A shopkeeper retaking a photo four times left five copies in the database and
+ * showed one. That is the whole storage problem, not the size of any single
+ * photo.
+ */
 async function retireImage(businessId, imageId) {
   if (!imageId) return;
-  await ProductImage.softDeleteOne({ _id: imageId, businessId });
+  await ProductImage.hardDeleteMany({ _id: imageId, businessId });
+}
+
+/**
+ * Turns the driver's E11000 into something a shopkeeper can act on.
+ *
+ * The unique index is the only place duplicates are actually prevented --
+ * checking with a findOne first would still race two phones adding the same
+ * product at the same moment. So the check IS the insert, and this translates
+ * the failure.
+ */
+function asDuplicateNameError(err, name) {
+  if (err?.code !== 11000) return err;
+  return ApiError.conflict(
+    `This category already has a product called "${name}"`,
+    { name: 'already used in this category' }
+  );
 }
 
 /** Guarantees the categoryId belongs to THIS tenant before it is stored. */
@@ -83,15 +112,22 @@ export async function createProduct(req, res) {
   // half-created product behind.
   const imageId = await claimImage(req.businessId, req.body.imageId, null);
 
-  const product = await Product.create({
-    businessId: req.businessId,
-    categoryId: req.body.categoryId,
-    name: String(req.body.name).trim(),
-    price,
-    cost,
-    stock: toCount(req.body.stock, 'stock'),
-    imageId,
-  });
+  const name = String(req.body.name).trim();
+
+  let product;
+  try {
+    product = await Product.create({
+      businessId: req.businessId,
+      categoryId: req.body.categoryId,
+      name,
+      price,
+      cost,
+      stock: toCount(req.body.stock, 'stock'),
+      imageId,
+    });
+  } catch (err) {
+    throw asDuplicateNameError(err, name);
+  }
 
   if (imageId) await claimImage(req.businessId, imageId, product._id);
 
@@ -122,11 +158,18 @@ export async function updateProduct(req, res) {
 
   if (!Object.keys(update).length) throw ApiError.badRequest('Nothing to update');
 
-  const product = await Product.findOneAndUpdate(
-    { _id: req.params.id, businessId: req.businessId },
-    update,
-    { new: true, runValidators: true }
-  );
+  let product;
+  try {
+    product = await Product.findOneAndUpdate(
+      { _id: req.params.id, businessId: req.businessId },
+      update,
+      { new: true, runValidators: true }
+    );
+  } catch (err) {
+    // Renaming into a taken name, or MOVING a product into a category that
+    // already has one by this name -- both land here.
+    throw asDuplicateNameError(err, update.name ?? 'that name');
+  }
   if (!product) throw ApiError.notFound('Product not found');
 
   // Retire the old photo only after the swap succeeded.
@@ -177,10 +220,25 @@ export async function adjustStock(req, res) {
  * DELETE /api/products/:id -- soft delete.
  * The row survives so historical order lines still resolve to a real product
  * (for grouping in reports), and a super admin can restore it.
+ *
+ * Its PHOTO does not survive, and that asymmetry is deliberate. The product row
+ * is a few hundred bytes and earns its keep by making old receipts resolve; the
+ * photo is ~60KB and earns nothing, because order lines snapshot the name and
+ * price, never the picture. A business restore also would not bring it back:
+ * restoreMany is scoped to rows the ARCHIVE deleted, so a product deleted
+ * individually by the shop stays deleted and its image would sit there forever.
+ *
+ * Archiving a whole business still soft-deletes images, because that path is
+ * built to be reversible -- see adminController.
  */
 export async function deleteProduct(req, res) {
   assertObjectId(req.params.id);
   const product = await Product.softDeleteOne({ _id: req.params.id, businessId: req.businessId });
   if (!product) throw ApiError.notFound('Product not found');
+
+  // After the product is gone, so a failure here cannot destroy a photo that
+  // is still attached to a live product.
+  await retireImage(req.businessId, product.imageId);
+
   res.json({ ok: true, deleted: { _id: product._id, name: product.name } });
 }

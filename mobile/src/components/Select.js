@@ -1,7 +1,10 @@
 import { useMemo, useState } from 'react';
-import { FlatList, Modal, Pressable, Text, TextInput, View } from 'react-native';
+import {
+  FlatList, Modal, Pressable, Text, TextInput, useWindowDimensions, View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTranslation } from 'react-i18next';
+import { dialogBox } from '../utils/dialogLayout';
 
 /**
  * A dropdown: a field showing the current choice, which opens a sheet listing
@@ -18,6 +21,13 @@ import { useTranslation } from 'react-i18next';
  * Text that must never be truncated carries an explicit lineHeight. Devanagari
  * and Gujarati matras sit outside the box the font metrics report, so a line
  * height derived from those metrics clips them.
+ *
+ * The option list is a CENTRED dialog, not a bottom sheet. It used to slide up
+ * from the bottom edge, which was fine when the field behind it was on a full
+ * screen -- but the category field now lives inside a centred product dialog,
+ * and a sheet climbing out of the bottom of the screen to answer a question
+ * asked in the middle of it reads as a different, unrelated surface. Matching
+ * FormModal keeps one idea on screen at a time.
  */
 
 /** 15/16px text: ~1.4x clears matras and descenders. */
@@ -40,8 +50,13 @@ export default function Select({
   searchable,
 }) {
   const { t } = useTranslation();
+  const { height } = useWindowDimensions();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+
+  // Shares FormModal's cap so a dropdown opened from inside a dialog can never
+  // be taller than the dialog that asked the question.
+  const { maxHeight: sheetMaxHeight } = dialogBox(height, 0);
 
   const selected = useMemo(
     () => options.find((o) => String(o.value) === String(value)) ?? null,
@@ -104,10 +119,33 @@ export default function Select({
         <Text className="mt-1 text-xs text-slate-500">{hint}</Text>
       ) : null}
 
-      <Modal visible={open} animationType="slide" transparent onRequestClose={close}>
-        <View className="flex-1 justify-end bg-black/40">
-          <Pressable className="flex-1" onPress={close} accessibilityLabel={t('common.close')} />
-          <View className="max-h-[75%] rounded-t-3xl bg-white pb-6">
+      <Modal
+        visible={open}
+        animationType="fade"
+        transparent
+        onRequestClose={close}
+        statusBarTranslucent
+      >
+        <View className="flex-1 items-center justify-center px-4">
+          {/* Behind the card, not around it: as a parent, a tap on the search
+              box would bubble out and close the list. */}
+          <Pressable
+            className="absolute inset-0 bg-black/50"
+            onPress={close}
+            accessibilityRole="button"
+            accessibilityLabel={t('common.close')}
+          />
+          {/* Pixels, not `max-h-[75%]`. A percentage resolves against the
+              parent, and this card's parent is sized by the card -- the same
+              trap that clipped every FormModal to 86% of itself. */}
+          <View
+            className="w-full max-w-md overflow-hidden rounded-3xl bg-white pb-2"
+            style={{
+              maxHeight: sheetMaxHeight,
+              shadowColor: '#00111F', shadowOpacity: 0.3,
+              shadowRadius: 24, shadowOffset: { width: 0, height: 10 }, elevation: 12,
+            }}
+          >
             <View className="flex-row items-center justify-between border-b border-slate-200 px-5 py-4">
               <Text className="text-lg font-bold text-slate-900" accessibilityRole="header">
                 {sheetTitle ?? label ?? ''}
@@ -159,8 +197,10 @@ export default function Select({
                     ) : null}
 
                     <View className="flex-1 pr-2">
-                      {/* No numberOfLines: the sheet is full-width, so a long
-                          label wraps onto a second line instead of being cut. */}
+                      {/* No numberOfLines: the row is allowed to grow, so a
+                          long label wraps onto a second line instead of being
+                          cut. That matters more now the card is narrower than
+                          the screen. */}
                       <Text
                         style={{ lineHeight: ROW_LINE_HEIGHT }}
                         className={`text-base ${active ? 'font-semibold text-blue-700' : 'text-slate-800'}`}

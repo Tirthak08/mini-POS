@@ -20,6 +20,7 @@ import { confirm, promptNumber } from '../store/confirmStore';
 import { pickAndUploadImage, deleteImage } from '../utils/imageUpload';
 import { formatINR, round2, relativeAge } from '../utils/money';
 import { chartPalette } from '../theme';
+import { useScrollTopOnFocus } from '../hooks/useScrollTopOnFocus';
 
 const EMPTY_PRODUCT = { name: '', categoryId: '', price: '', cost: '', stock: '', imageId: null, imageUrl: null, localUri: null };
 
@@ -34,6 +35,7 @@ export default function InventoryScreen() {
   } = useInventoryStore();
 
   const lowStockThreshold = useSettingsStore((s) => s.lowStockThreshold);
+  const listRef = useScrollTopOnFocus();
 
   const [catModal, setCatModal] = useState(null); // null | {} | category
   const [catForm, setCatForm] = useState({ name: '', color: chartPalette[0] });
@@ -522,6 +524,7 @@ export default function InventoryScreen() {
         <Loading label={t('common.loading')} />
       ) : (
         <FlatList
+          ref={listRef}
           data={data}
           keyExtractor={(item) => String(item._id)}
           renderItem={isCategories ? renderCategory : renderProduct}

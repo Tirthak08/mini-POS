@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ScrollView, Text, useWindowDimensions, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Pressable, RefreshControl, ScrollView, Text, useWindowDimensions, View } from 'react-native';
 import { LineChart } from 'react-native-chart-kit';
 import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
 import { useTranslation } from 'react-i18next';
 
 import Screen from '../components/Screen';
@@ -16,9 +17,44 @@ import { formatINR, formatDate } from '../utils/money';
 import { resolveRange, DEFAULT_PRESET, describeRange } from '../utils/dateRange';
 import { exportCsv, exportExcel, exportPdf } from '../utils/exports';
 import { chartConfig, chartPalette, colors, seriesColors, otherColor, rgba } from '../theme';
+import { useScrollTopOnFocus } from '../hooks/useScrollTopOnFocus';
+import ReportPreview from '../components/ReportPreview';
+import DetailModal from '../components/DetailModal';
+import ChartTooltip from '../components/ChartTooltip';
+import { topProductTotals, categoryTotals } from '../utils/reportTotals';
+import { bucketLabel } from '../utils/chartTooltip';
 
 /** Six or fewer categories keep their own hue; the rest fold into "Other". */
 const MAX_CATEGORY_SLICES = 6;
+
+
+/**
+ * A card heading with an action on the right.
+ *
+ * Both report sections show a truncated list, and until now nothing said so --
+ * "Top products" looked like the whole answer when it was the first eight rows
+ * of it. The hint states the truncation and the action undoes it.
+ */
+function SectionHeader({ title, hint, onDetails, detailsLabel }) {
+  return (
+    <View className="mb-3 flex-row items-start justify-between">
+      <View className="flex-1 pr-2">
+        <Text className="text-sm font-semibold text-slate-800">{title}</Text>
+        {hint ? <Text className="mt-0.5 text-xs text-slate-400">{hint}</Text> : null}
+      </View>
+      <Pressable
+        onPress={onDetails}
+        hitSlop={8}
+        accessibilityRole="button"
+        accessibilityLabel={`${detailsLabel} — ${title}`}
+        className="flex-row items-center rounded-lg px-2 py-1 active:bg-slate-100"
+      >
+        <Text className="text-xs font-semibold text-blue-700">{detailsLabel}</Text>
+        <Ionicons name="chevron-forward" size={14} color="#1D4ED8" />
+      </Pressable>
+    </View>
+  );
+}
 
 export default function ReportsScreen() {
   const { t } = useTranslation();
@@ -29,11 +65,29 @@ export default function ReportsScreen() {
   const [range, setRange] = useState(() => resolveRange(DEFAULT_PRESET));
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [busyExport, setBusyExport] = useState(null); // 'csv' | 'excel' | 'pdf'
+  // 'share' hands the file to the OS sheet; 'save' writes it into a folder the
+  // shopkeeper picks. Remembered across exports because it is a habit, not a
+  // per-file decision.
+  const [exportMode, setExportMode] = useState('share');
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewPayload, setPreviewPayload] = useState(null);
+  const [preparing, setPreparing] = useState(false);
+  const [detail, setDetail] = useState(null); // null | 'categories' | 'products'
+  const [allProducts, setAllProducts] = useState(null);
+  const [tooltip, setTooltip] = useState(null); // { chart, index, x, y }
+  const scrollRef = useScrollTopOnFocus();
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * `silent` keeps the figures on screen while they are re-fetched, instead of
+   * swapping the whole tab for a spinner. Pulling to refresh a report you are
+   * reading should not make it disappear -- and the old numbers are the right
+   * thing to show until the new ones land.
+   */
+  const load = useCallback(async ({ silent = false } = {}) => {
+    silent ? setRefreshing(true) : setLoading(true);
     setError(null);
     try {
       // One round trip per card, in parallel.
@@ -49,32 +103,110 @@ export default function ReportsScreen() {
       setError(err.message);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, [range]);
 
   useEffect(() => { load(); }, [load]);
 
-  const runExport = async (kind) => {
-    setBusyExport(kind);
+  /**
+   * Come back to this tab after ringing up a sale and the totals should already
+   * include it -- the Sales and Stock tabs both behave that way.
+   *
+   * The ref dance matters here more than it does on those tabs. This screen
+   * fires FOUR requests per load, and a focus effect that depended on `load`
+   * would re-run whenever the period changed -- firing all four again on top of
+   * the four the period change itself triggers, and four more on first mount.
+   * Reading the latest `load` through a ref keeps the effect's deps empty, so
+   * it runs on genuine focus changes and nothing else.
+   */
+  const loadRef = useRef(load);
+  useEffect(() => { loadRef.current = load; }, [load]);
+
+  const firstFocus = useRef(true);
+  useFocusEffect(useCallback(() => {
+    // The mount load is already in flight; refreshing on top of it would double
+    // every request for no new information.
+    if (firstFocus.current) {
+      firstFocus.current = false;
+      return;
+    }
+    loadRef.current({ silent: true });
+  }, []));
+
+  /**
+   * The export payload is a separate, heavier request than the four the screen
+   * already makes -- it carries every order and line item in the period. It is
+   * fetched once and reused by the preview and by all three formats, and thrown
+   * away when the period changes so a stale month can never be exported under a
+   * new heading.
+   */
+  const fetchExportPayload = useCallback(async () => {
+    if (previewPayload) return previewPayload;
+    const raw = await reportApi.exportData(range.apiRange);
+    const payload = {
+      ...raw,
+      summary: data?.summary?.sales,
+      topProducts: data?.top?.products ?? [],
+    };
+    setPreviewPayload(payload);
+    return payload;
+  }, [previewPayload, range, data]);
+
+  useEffect(() => { setPreviewPayload(null); setAllProducts(null); }, [range]);
+
+  const openPreview = async () => {
+    setPreparing(true);
     try {
-      const payload = await reportApi.exportData(range.apiRange);
+      const payload = await fetchExportPayload();
       if (!payload.orders?.length) {
         toast.error(t('reports.noData'));
         return;
       }
-      if (kind === 'csv') await exportCsv(payload);
-      else if (kind === 'excel') await exportExcel(payload);
-      else {
-        await exportPdf({
-          ...payload,
-          summary: data?.summary?.sales,
-          topProducts: data?.top?.products ?? [],
-        });
+      setPreviewOpen(true);
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setPreparing(false);
+    }
+  };
+
+  const runExport = async (kind) => {
+    setBusyExport(kind);
+    try {
+      const payload = await fetchExportPayload();
+      if (!payload.orders?.length) {
+        toast.error(t('reports.noData'));
+        return;
       }
+      const opts = { mode: exportMode };
+      const written = kind === 'csv' ? await exportCsv(payload, opts)
+        : kind === 'excel' ? await exportExcel(payload, opts)
+          : await exportPdf(payload, opts);
+
+      // saveToDevice returns null when the folder picker was dismissed. That is
+      // a choice, not a failure, so it gets no error -- but it must not claim
+      // to have saved either.
+      if (exportMode === 'save' && written) toast.success(t('reports.saved'));
     } catch (err) {
       toast.error(err.message);
     } finally {
       setBusyExport(null);
+    }
+  };
+
+  /**
+   * The detail list needs more products than the eight the card shows. Fetched
+   * only when the detail is actually opened -- most sessions never ask.
+   */
+  const openProductDetail = async () => {
+    setDetail('products');
+    if (allProducts) return;
+    try {
+      const res = await reportApi.topProducts({ ...range.apiRange, limit: 50 });
+      setAllProducts(res.products ?? []);
+    } catch (err) {
+      toast.error(err.message);
     }
   };
 
@@ -134,14 +266,35 @@ export default function ReportsScreen() {
 
   const maxCategoryRevenue = Math.max(1, ...categorySlices.map((c) => c.revenue));
 
+  const allCategories = data?.byCategory?.categories ?? [];
+  const labelFor = (bucket) => bucketLabel(bucket, formatDate);
+
   return (
     <Screen title={t('reports.title')}>
-      <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
+      <ScrollView
+        ref={scrollRef}
+        contentContainerStyle={{ paddingBottom: 40, flexGrow: 1 }}
+        refreshControl={(
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => load({ silent: true })}
+            colors={[colors.brand]}
+            tintColor={colors.brand}
+          />
+        )}
+      >
         {/* Period filter. Reports and Sales share it, so the two tabs cannot
             disagree about what "this month" means. */}
         <DateRangePicker value={range} onChange={setRange} />
 
-        <ErrorBanner message={error} onRetry={load} retryLabel={t('common.retry')} />
+        {/* Silent only when there is something on screen to keep. A retry with
+            nothing behind it needs the spinner, or the tap appears to do
+            nothing at all. */}
+        <ErrorBanner
+          message={error}
+          onRetry={() => load({ silent: Boolean(data) })}
+          retryLabel={t('common.retry')}
+        />
 
         {loading ? <Loading label={t('common.loading')} /> : null}
 
@@ -225,18 +378,39 @@ export default function ReportsScreen() {
                   <Text className="mb-2 px-3 text-xs text-slate-400">
                     {describeRange(range, t, formatDate)}
                   </Text>
-                  <LineChart
-                    data={{ labels, datasets: [{ data: trend.map((b) => b.revenue), color: rgba(seriesColors.revenue) }] }}
-                    width={chartWidth}
-                    height={210}
-                    chartConfig={chartConfig}
-                    bezier
-                    withInnerLines
-                    withVerticalLines={false}
-                    yAxisLabel="₹"
-                    fromZero
-                    style={{ borderRadius: 8, paddingRight: 44 }}
-                  />
+                  {/* The chart and its tooltip share a positioning context, so
+                      the callout can sit over the exact point that was tapped. */}
+                  <View>
+                    <LineChart
+                      data={{ labels, datasets: [{ data: trend.map((b) => b.revenue), color: rgba(seriesColors.revenue) }] }}
+                      width={chartWidth}
+                      height={210}
+                      chartConfig={chartConfig}
+                      bezier
+                      withInnerLines
+                      withVerticalLines={false}
+                      yAxisLabel="₹"
+                      fromZero
+                      style={{ borderRadius: 8, paddingRight: 44 }}
+                      onDataPointClick={({ index, x, y }) => setTooltip((cur) => (
+                        // Tapping the same point again dismisses it, so there is
+                        // a way to clear the callout without hunting for one.
+                        cur?.chart === 'trend' && cur.index === index
+                          ? null
+                          : { chart: 'trend', index, x, y }
+                      ))}
+                    />
+                    {tooltip?.chart === 'trend' && trend[tooltip.index] ? (
+                      <ChartTooltip
+                        x={tooltip.x}
+                        y={tooltip.y}
+                        chartWidth={chartWidth}
+                        label={labelFor(trend[tooltip.index])}
+                        value={formatINR(trend[tooltip.index].revenue)}
+                        sub={t('reports.revenue')}
+                      />
+                    ) : null}
+                  </View>
                 </Card>
               </View>
             ) : null}
@@ -261,6 +435,7 @@ export default function ReportsScreen() {
                     ))}
                   </View>
 
+                  <View>
                   <LineChart
                     data={{
                       labels,
@@ -277,7 +452,21 @@ export default function ReportsScreen() {
                     yAxisLabel="₹"
                     fromZero
                     style={{ borderRadius: 8, paddingRight: 44 }}
+                    onDataPointClick={({ index, x, y }) => setTooltip((cur) => (
+                      cur?.chart === 'rvp' && cur.index === index ? null : { chart: 'rvp', index, x, y }
+                    ))}
                   />
+                  {tooltip?.chart === 'rvp' && trend[tooltip.index] ? (
+                    <ChartTooltip
+                      x={tooltip.x}
+                      y={tooltip.y}
+                      chartWidth={chartWidth}
+                      label={labelFor(trend[tooltip.index])}
+                      value={formatINR(trend[tooltip.index].revenue)}
+                      sub={`${t('reports.profit')} ${formatINR(trend[tooltip.index].profit)}`}
+                    />
+                  ) : null}
+                  </View>
                 </Card>
               </View>
             ) : null}
@@ -289,7 +478,14 @@ export default function ReportsScreen() {
             {categorySlices.length ? (
               <View className="mt-3 px-4">
                 <Card>
-                  <Text className="mb-3 text-sm font-semibold text-slate-800">{t('reports.byCategory')}</Text>
+                  <SectionHeader
+                    title={t('reports.byCategory')}
+                    onDetails={() => setDetail('categories')}
+                    detailsLabel={t('reports.details')}
+                    hint={allCategories.length > categorySlices.length
+                      ? t('reports.showingTop', { n: categorySlices.length, of: allCategories.length })
+                      : null}
+                  />
                   {categorySlices.map((c) => (
                     <View key={String(c.categoryId)} className="mb-3">
                       <View className="mb-1 flex-row items-center justify-between">
@@ -319,7 +515,12 @@ export default function ReportsScreen() {
             {data?.top?.products?.length ? (
               <View className="mt-3 px-4">
                 <Card>
-                  <Text className="mb-3 text-sm font-semibold text-slate-800">{t('reports.topProducts')}</Text>
+                  <SectionHeader
+                    title={t('reports.topProducts')}
+                    onDetails={openProductDetail}
+                    detailsLabel={t('reports.details')}
+                    hint={t('reports.showingTopProducts', { n: data.top.products.length })}
+                  />
                   {data.top.products.map((p, i) => (
                     <View
                       key={String(p.productId ?? i)}
@@ -346,6 +547,51 @@ export default function ReportsScreen() {
         <View className="mt-4 px-4">
           <Card>
             <Text className="mb-3 text-sm font-semibold text-slate-800">{t('reports.exportTitle')}</Text>
+
+            {/* Preview first and full width. Sending a file you have not seen
+                to an accountant is how one export becomes three. */}
+            <Button
+              title={t('reports.preview')}
+              icon="eye-outline"
+              onPress={openPreview}
+              loading={preparing}
+              disabled={Boolean(busyExport) || preparing}
+              fullWidth
+            />
+
+            {/* Share hands the file to the OS sheet; Save writes it into a
+                folder. Both were previously "Share", which is the wrong word
+                for the thing most people want -- a copy they can find later. */}
+            <View className="mb-3 mt-3 flex-row gap-2">
+              {[
+                { key: 'share', label: t('reports.share'), icon: 'share-social-outline' },
+                { key: 'save', label: t('reports.saveToDevice'), icon: 'download-outline' },
+              ].map(({ key, label, icon }) => {
+                const active = exportMode === key;
+                return (
+                  <Pressable
+                    key={key}
+                    onPress={() => setExportMode(key)}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: active }}
+                    accessibilityLabel={label}
+                    className={`flex-1 flex-row items-center justify-center rounded-xl border py-2.5 ${
+                      active ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+                    }`}
+                  >
+                    <Ionicons name={icon} size={15} color={active ? '#FFFFFF' : '#475569'} />
+                    <Text
+                      className={`ml-1.5 text-sm font-semibold ${active ? 'text-white' : 'text-slate-600'}`}
+                      numberOfLines={1}
+                      style={{ lineHeight: 20 }}
+                    >
+                      {label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
             <View className="flex-row gap-2">
               <View className="flex-1">
                 <Button
@@ -387,6 +633,87 @@ export default function ReportsScreen() {
           </Card>
         </View>
       </ScrollView>
+
+      <ReportPreview
+        visible={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        payload={previewPayload}
+        businessName={previewPayload?.business?.name}
+        range={range}
+        busy={busyExport}
+        mode={exportMode}
+        onModeChange={setExportMode}
+        onExport={runExport}
+      />
+
+      {/* Every category, not the six the chart has room for -- including the
+          ones folded into "Other", which is exactly where a category quietly
+          losing money ends up. */}
+      <DetailModal
+        visible={detail === 'categories'}
+        onClose={() => setDetail(null)}
+        title={t('reports.byCategory')}
+        subtitle={describeRange(range, t, formatDate)}
+        columns={[
+          { key: 'name', label: t('inventory.category'), flex: 2.4 },
+          { key: 'qty', label: t('reports.qty'), align: 'right', width: 44 },
+          { key: 'revenue', label: t('reports.revenue'), align: 'right', flex: 1.4 },
+          { key: 'profit', label: t('reports.profit'), align: 'right', flex: 1.3, tone: 'auto' },
+          { key: 'share', label: '%', align: 'right', width: 48 },
+        ]}
+        rows={allCategories.map((c) => ({
+          __key: String(c.categoryId ?? c.name),
+          name: c.name,
+          qty: c.qty,
+          revenue: c.revenue, revenueDisplay: formatINR(c.revenue),
+          profit: c.profit, profitDisplay: formatINR(c.profit),
+          share: `${c.sharePercent}%`,
+        }))}
+        totals={(() => {
+          const ct = categoryTotals(allCategories);
+          return {
+            qty: ct.qty,
+            revenue: ct.revenue, revenueDisplay: formatINR(ct.revenue),
+            profit: ct.profit, profitDisplay: formatINR(ct.profit),
+            share: `${ct.sharePercent}%`,
+          };
+        })()}
+        totalsLabel={t('common.total')}
+        emptyLabel={t('reports.noData')}
+      />
+
+      <DetailModal
+        visible={detail === 'products'}
+        onClose={() => setDetail(null)}
+        title={t('reports.topProducts')}
+        subtitle={describeRange(range, t, formatDate)}
+        columns={[
+          { key: 'rank', label: '#', width: 26 },
+          { key: 'name', label: t('inventory.productName'), flex: 2.6 },
+          { key: 'qty', label: t('reports.qty'), align: 'right', width: 44 },
+          { key: 'revenue', label: t('reports.revenue'), align: 'right', flex: 1.4 },
+          { key: 'profit', label: t('reports.profit'), align: 'right', flex: 1.3, tone: 'auto' },
+        ]}
+        rows={(allProducts ?? data?.top?.products ?? []).map((p, i) => ({
+          __key: String(p.productId ?? i),
+          rank: i + 1,
+          name: p.name,
+          qty: p.qty,
+          revenue: p.revenue, revenueDisplay: formatINR(p.revenue),
+          profit: p.profit, profitDisplay: formatINR(p.profit),
+        }))}
+        totals={(() => {
+          const tt = topProductTotals(allProducts ?? data?.top?.products ?? []);
+          return {
+            qty: tt.qty,
+            revenue: tt.revenue, revenueDisplay: formatINR(tt.revenue),
+            profit: tt.profit, profitDisplay: formatINR(tt.profit),
+          };
+        })()}
+        totalsLabel={t('common.total')}
+        emptyLabel={t('reports.noData')}
+        footnote={t('reports.productDetailNote')}
+      />
     </Screen>
   );
 }

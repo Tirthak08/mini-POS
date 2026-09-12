@@ -16,6 +16,7 @@ import { toast } from '../store/uiStore';
 import { confirm } from '../store/confirmStore';
 import { formatINR, formatDate, toApiDate } from '../utils/money';
 import { startOfDay } from '../utils/dateRange';
+import { useScrollTopOnFocus } from '../hooks/useScrollTopOnFocus';
 
 const emptyForm = () => ({ amount: '', note: '', spentAt: startOfDay(new Date()) });
 
@@ -46,6 +47,7 @@ export default function ExpensesPanel({ range }) {
   const [form, setForm] = useState(emptyForm);
   const [formError, setFormError] = useState(null);
   const [saving, setSaving] = useState(false);
+  const listRef = useScrollTopOnFocus();
 
   const load = useCallback(async ({ silent = false } = {}) => {
     silent ? setRefreshing(true) : setLoading(true);
@@ -183,6 +185,7 @@ export default function ExpensesPanel({ range }) {
         <Loading label={t('common.loading')} />
       ) : (
         <FlatList
+          ref={listRef}
           data={rows}
           keyExtractor={(item) => String(item._id)}
           renderItem={renderRow}

@@ -17,7 +17,13 @@
     "test:startup": "node tests/startup-test.mjs",
     "test:hydration": "node tests/hydration-gate-test.mjs",
     "test:i18n": "node tests/i18n-test.mjs",
-    "test:settings": "node tests/settings-expenses-e2e.mjs"
+    "test:settings": "node tests/settings-expenses-e2e.mjs",
+    "test:dialog": "node tests/dialog-layout-test.mjs",
+    "test:fixes": "node tests/fixes-e2e.mjs",
+    "test:reports": "node tests/reports-refresh-test.mjs",
+    "test:totals": "node tests/report-totals-test.mjs",
+    "test:tooltip": "node tests/chart-tooltip-test.mjs",
+    "test:detail": "node tests/report-detail-e2e.mjs"
   },
   "dependencies": {
     "@expo/metro-runtime": "~6.1.2",

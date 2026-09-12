@@ -11,17 +11,19 @@ import Select from '../components/Select';
 import TextField from '../components/TextField';
 import EmptyState from '../components/EmptyState';
 import ProductImage from '../components/ProductImage';
+import { useScrollTopOnFocus } from '../hooks/useScrollTopOnFocus';
 import QuantityStepper from '../components/QuantityStepper';
 import ProductPreview from '../components/ProductPreview';
 import Loading, { ErrorBanner, StaleBanner } from '../components/Loading';
 import { useInventoryStore } from '../store/inventoryStore';
 import {
   useCartStore, selectItemCount, selectGross, selectGrandTotal, selectTotalDiscount, lineGross,
+  unitPrice, isRepriced,
 } from '../store/cartStore';
 import { useAuthStore } from '../store/authStore';
 import { orderApi } from '../api/endpoints';
 import { toast } from '../store/uiStore';
-import { formatINR, relativeAge } from '../utils/money';
+import { formatINR, relativeAge, round2 } from '../utils/money';
 import { shareReceipt } from '../utils/receipt';
 import { confirm } from '../store/confirmStore';
 
@@ -40,6 +42,9 @@ export default function PosScreen() {
   const [activeCategory, setActiveCategory] = useState('all');
   const [search, setSearch] = useState('');
   const [cartOpen, setCartOpen] = useState(false);
+  // The product grid. The cart list lives in a modal and is short-lived, so it
+  // has no stale offset to reset.
+  const gridRef = useScrollTopOnFocus();
   const [placing, setPlacing] = useState(false);
   const [preview, setPreview] = useState(null); // the product being inspected
 
@@ -206,8 +211,16 @@ export default function PosScreen() {
         <View className="flex-1 pr-2">
           <Text className="text-sm font-semibold text-slate-900" numberOfLines={1}>{item.name}</Text>
           <Text className="mt-0.5 text-xs text-slate-500">
-            {formatINR(item.price)} × {item.qty} = {formatINR(lineGross(item))}
+            {formatINR(unitPrice(item))} × {item.qty} = {formatINR(lineGross(item))}
           </Text>
+          {/* When the price has been changed by hand, say what the shelf says
+              too. Otherwise a repriced line is indistinguishable from a
+              mis-priced product, and nobody notices until the report. */}
+          {isRepriced(item) ? (
+            <Text className="mt-0.5 text-xs text-amber-600">
+              {t('pos.listPrice')} {formatINR(item.price)}
+            </Text>
+          ) : null}
         </View>
         <Pressable onPress={() => cart.removeItem(item.productId)} hitSlop={8} className="p-1" accessibilityLabel={t('common.remove')}>
           <Ionicons name="close-circle" size={20} color="#94A3B8" />
@@ -241,11 +254,30 @@ export default function PosScreen() {
         <Text className="text-base font-bold text-slate-900">{formatINR(lineGross(item))}</Text>
       </View>
 
-      {/* Per-item discount (PRD 6, screen 2). Clamped in the store, so the
-          line total can never render negative. */}
-      <View className="mt-2 flex-row items-center">
-        <Text className="mr-2 text-xs text-slate-500">{t('pos.itemDiscount')}</Text>
+      {/* Price and discount side by side.
+          The price box is for the sale in front of you, not the catalogue: a
+          haggled rate, a damaged tin, or simply collecting more than the shelf
+          says. Leaving it empty charges the catalogue price, so the common
+          case needs no interaction at all. Editing the product instead would
+          rewrite the price for every future sale. */}
+      <View className="mt-2 flex-row items-end gap-2">
         <View className="flex-1">
+          <Text className="mb-1 text-xs text-slate-500">{t('pos.unitPrice')}</Text>
+          <TextField
+            value={item.priceOverride != null ? String(item.priceOverride) : ''}
+            onChangeText={(v) => cart.setPriceOverride(item.productId, v)}
+            mode="money"
+            prefix="₹"
+            // The catalogue price as the placeholder: it shows what will be
+            // charged if nothing is typed, without pre-filling a value the
+            // operator then has to clear.
+            placeholder={String(item.price)}
+            className="mb-0"
+            accessibilityLabel={`${t('pos.unitPrice')} ${item.name}`}
+          />
+        </View>
+        <View className="flex-1">
+          <Text className="mb-1 text-xs text-slate-500">{t('pos.itemDiscount')}</Text>
           <TextField
             value={item.discount ? String(item.discount) : ''}
             onChangeText={(v) => cart.setDiscount(item.productId, v)}
@@ -259,10 +291,21 @@ export default function PosScreen() {
             accessibilityLabel={`${t('pos.itemDiscount')} ${item.name}`}
           />
         </View>
-        {item.discount > 0 ? (
-          <Text className="ml-2 text-xs font-semibold text-green-600">-{formatINR(item.discount)}</Text>
-        ) : null}
       </View>
+
+      {isRepriced(item) || item.discount > 0 ? (
+        <View className="mt-1.5 flex-row items-center justify-end gap-3">
+          {isRepriced(item) ? (
+            <Text className="text-xs font-semibold text-amber-600">
+              {unitPrice(item) > item.price ? '+' : ''}
+              {formatINR(round2(unitPrice(item) - item.price))} / {t('pos.perUnit')}
+            </Text>
+          ) : null}
+          {item.discount > 0 ? (
+            <Text className="text-xs font-semibold text-green-600">-{formatINR(item.discount)}</Text>
+          ) : null}
+        </View>
+      ) : null}
     </View>
   ), [cart, t]);
 
@@ -323,6 +366,7 @@ export default function PosScreen() {
 
           {/* Product grid */}
           <FlatList
+            ref={gridRef}
             data={gridData}
             keyExtractor={(item) => String(item._id)}
             renderItem={renderProduct}

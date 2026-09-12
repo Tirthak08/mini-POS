@@ -15,7 +15,11 @@
     "test:standalone": "node tests/standalone-fallback.mjs",
     "test:ratelimit": "node tests/ratelimit.mjs",
     "test:clamp": "node tests/model-clamp.mjs",
-    "test:expenses": "node tests/expenses.mjs"
+    "test:expenses": "node tests/expenses.mjs",
+    "db:dupes": "node src/utils/findDuplicates.js",
+    "test:pricing": "node tests/pricing-and-dupes.mjs",
+    "db:images": "node src/utils/reclaimImages.js",
+    "test:images": "node tests/image-lifecycle.mjs"
   },
   "keywords": [
     "pos",

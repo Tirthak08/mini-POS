@@ -37,6 +37,32 @@ function toBuffer(value) {
 }
 
 /**
+ * How long an unattached image is allowed to live.
+ *
+ * Uploading before the product exists is legitimate -- it is what lets a new
+ * product be saved with its photo already in place -- so an image with no
+ * productId is normal for the minute the form is open. Past a day it is not a
+ * pending form, it is a form somebody abandoned, and nothing will ever claim it.
+ */
+const ORPHAN_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Removes this shop's abandoned uploads.
+ *
+ * Runs on upload rather than on a schedule: this app has no scheduler, and a
+ * maintenance step a single operator has to remember is a maintenance step that
+ * does not happen. Uploads are the only event that creates orphans, so they are
+ * the natural moment to clear the last ones.
+ */
+async function sweepOrphans(businessId) {
+  return ProductImage.hardDeleteMany({
+    businessId,
+    productId: null,
+    createdAt: { $lt: new Date(Date.now() - ORPHAN_GRACE_MS) },
+  });
+}
+
+/**
  * POST /api/images   { base64, contentType, width?, height?, productId? }
  *
  * JSON rather than multipart: the payload is already small (the app downscales
@@ -101,6 +127,13 @@ export async function uploadImage(req, res) {
     ...(req.body.height && { height: toCount(req.body.height, 'height', { min: 1, max: 20000 }) }),
   });
 
+  // Never let tidying up fail a photo the shopkeeper just took.
+  try {
+    await sweepOrphans(req.businessId);
+  } catch (err) {
+    console.warn('Orphan image sweep failed (upload unaffected):', err.message);
+  }
+
   res.status(201).json({
     ok: true,
     image: {
@@ -147,11 +180,25 @@ export async function getImage(req, res) {
   res.end(buffer);
 }
 
-/** DELETE /api/images/:id -- soft delete, and detach it from its product. */
+/**
+ * DELETE /api/images/:id -- and this one really deletes.
+ *
+ * Everything else the shop can remove is soft-deleted so it can come back. An
+ * image is the exception: the bytes ARE the row, nothing in the app offers to
+ * restore a single photo, and the admin restore only resurrects what the
+ * ARCHIVE deleted. Keeping ~60KB per removed photo forever bought nothing.
+ *
+ * Read first, then delete: the row has to be inspected for its productId while
+ * it still exists, so the product can be detached afterwards.
+ */
 export async function deleteImage(req, res) {
   assertObjectId(req.params.id);
-  const image = await ProductImage.softDeleteOne({ _id: req.params.id, businessId: req.businessId });
+  const image = await ProductImage.findOne({
+    _id: req.params.id, businessId: req.businessId,
+  }).lean();
   if (!image) throw ApiError.notFound('Image not found');
+
+  await ProductImage.hardDeleteMany({ _id: image._id, businessId: req.businessId });
 
   if (image.productId) {
     await Product.updateOne(
