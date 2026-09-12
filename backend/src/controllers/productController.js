@@ -166,9 +166,23 @@ export async function updateProduct(req, res) {
       { new: true, runValidators: true }
     );
   } catch (err) {
-    // Renaming into a taken name, or MOVING a product into a category that
-    // already has one by this name -- both land here.
-    throw asDuplicateNameError(err, update.name ?? 'that name');
+    /**
+     * Renaming into a taken name, or MOVING a product into a category that
+     * already has one by this name -- both land here.
+     *
+     * On a move there is no `name` in the patch, and saying 'that name' told
+     * the operator nothing at the exact moment they needed to know WHICH name
+     * clashed. Reorganising a catalogue means hitting this repeatedly, so the
+     * message has to name the product; one extra read on a path that has
+     * already failed is worth it.
+     */
+    let clashing = update.name;
+    if (!clashing) {
+      const existing = await Product.findOne({ _id: req.params.id, businessId: req.businessId })
+        .select('name').lean().catch(() => null);
+      clashing = existing?.name;
+    }
+    throw asDuplicateNameError(err, clashing ?? 'that name');
   }
   if (!product) throw ApiError.notFound('Product not found');
 

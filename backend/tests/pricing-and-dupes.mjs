@@ -141,6 +141,19 @@ try {
     token, body: { categoryId: grain._id },
   });
   check('MOVING a product into a category that already has the name -> 409', move.status === 409, move.body);
+  /**
+   * Reorganising a catalogue means hitting this repeatedly, and a move carries
+   * no `name` in the patch -- so the message used to read "a product called
+   * 'that name'", which is exactly no help at the moment it appears.
+   */
+  check('and the message names the product, so the operator knows which one clashed',
+    /"Rice 5kg"/.test(move.body?.error ?? ''), move.body);
+
+  const renameAndMove = await api('PATCH', `/products/${other.body.product._id}`, {
+    token, body: { name: 'Rice 5kg Offer', categoryId: grain._id },
+  });
+  check('renaming AND moving in one request succeeds -- the way out of that clash',
+    renameAndMove.status === 200, renameAndMove.body);
 
   const okRename = await api('PATCH', `/products/${diff.body.product._id}`, {
     token, body: { name: 'Rice 20kg' },
