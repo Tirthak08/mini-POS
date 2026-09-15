@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { ApiError } from './ApiError.js';
+import { allowsFraction, round3, UNITS, DEFAULT_UNIT } from '../models/units.js';
 
 /** Throws a single 400 listing every missing field, instead of failing one at a time. */
 export function requireFields(body = {}, fields = []) {
@@ -48,6 +49,54 @@ export function toCount(value, field, { required = false, min = 0, max = 1_000_0
   if (n > max) throw ApiError.badRequest(`${field} is too large`, { [field]: `must be <= ${max}` });
   return n;
 }
+
+/**
+ * A quantity, which may or may not be allowed to have a fraction.
+ *
+ * Separate from `toCount` rather than a flag on it, because the two mean
+ * different things: toCount is for things that are inherently whole (a PIN
+ * length, a page size), and this is for an amount of a product, where whether
+ * a fraction is legal depends on how that product is measured.
+ *
+ * The rejection message names the unit. "must be a whole number" is useless
+ * when the operator is looking at a screen that does not say why -- "soap is
+ * sold in pcs" is something they can act on.
+ */
+export function toQty(value, field, { fractional = true, required = false, min = 0, max = 1_000_000, unit } = {}) {
+  if (value === undefined || value === null || value === '') {
+    if (required) throw ApiError.badRequest(`${field} is required`, { [field]: 'required' });
+    return min;
+  }
+  const n = Number(value);
+  if (!Number.isFinite(n)) throw ApiError.badRequest(`${field} must be a number`, { [field]: 'not a number' });
+  if (n < min) throw ApiError.badRequest(`${field} must be at least ${min}`, { [field]: `must be >= ${min}` });
+  if (n > max) throw ApiError.badRequest(`${field} is too large`, { [field]: `must be <= ${max}` });
+
+  const rounded = round3(n);
+  if (!fractional && !Number.isInteger(rounded)) {
+    throw ApiError.badRequest(
+      unit
+        ? `${field} must be a whole number — this product is sold in ${unit}`
+        : `${field} must be a whole number`,
+      { [field]: 'must be a whole number for this unit' }
+    );
+  }
+  return rounded;
+}
+
+/** Validates a unit against the closed set, defaulting rather than failing on absence. */
+export function toUnit(value, field = 'unit') {
+  if (value === undefined || value === null || value === '') return DEFAULT_UNIT;
+  const u = String(value).trim().toLowerCase();
+  if (!UNITS.includes(u)) {
+    throw ApiError.badRequest(`"${value}" is not a unit this app knows`, {
+      [field]: `must be one of: ${UNITS.join(', ')}`,
+    });
+  }
+  return u;
+}
+
+export { allowsFraction };
 
 export function assertObjectId(id, field = 'id') {
   if (!mongoose.Types.ObjectId.isValid(String(id ?? ''))) {

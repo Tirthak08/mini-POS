@@ -198,6 +198,7 @@ export default function ReportPreview({
                   key={key}
                   onPress={() => onModeChange(key)}
                   accessibilityRole="button"
+                  aria-selected={active}
                   accessibilityState={{ selected: active }}
                   accessibilityLabel={label}
                   className={`flex-1 flex-row items-center justify-center rounded-xl border py-2.5 ${

@@ -7,6 +7,9 @@ import expenseRoutes from './expenseRoutes.js';
 import reportRoutes from './reportRoutes.js';
 import imageRoutes from './imageRoutes.js';
 import adminRoutes from './adminRoutes.js';
+import backupRoutes from './backupRoutes.js';
+import customerRoutes from './customerRoutes.js';
+import paymentRoutes from './paymentRoutes.js';
 
 const router = Router();
 
@@ -17,6 +20,9 @@ router.use('/orders', orderRoutes);
 router.use('/expenses', expenseRoutes);
 router.use('/images', imageRoutes);
 router.use('/reports', reportRoutes);
+router.use('/customers', customerRoutes);
+router.use('/payments', paymentRoutes);
+router.use('/backup', backupRoutes);
 router.use('/admin', adminRoutes);
 
 export default router;

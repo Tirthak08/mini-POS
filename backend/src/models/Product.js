@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { softDeletePlugin } from './plugins/softDelete.js';
+import { UNITS, DEFAULT_UNIT, allowsFraction } from './units.js';
 
 /** PRD 3C -- Product / Item. Prices are INR. */
 const productSchema = new mongoose.Schema(
@@ -40,6 +41,18 @@ const productSchema = new mongoose.Schema(
       type: Number,
       default: 0,
       min: [0, 'Cost cannot be negative'],
+    },
+    /**
+     * How this product is measured, which decides whether half of one exists.
+     *
+     * Defaults to `pcs`, so every product that already exists keeps behaving
+     * exactly as it did -- whole numbers only -- until somebody deliberately
+     * says otherwise.
+     */
+    unit: {
+      type: String,
+      default: DEFAULT_UNIT,
+      enum: { values: UNITS, message: '"{VALUE}" is not a unit this app knows' },
     },
     stock: {
       type: Number,
@@ -86,6 +99,11 @@ productSchema.index(
     collation: { locale: 'en', strength: 2 },
   }
 );
+
+/** True when this product can be sold in fractions -- rice by the kilo, oil by the litre. */
+productSchema.virtual('fractional').get(function fractional() {
+  return allowsFraction(this.unit);
+});
 
 /** Profit per unit -- for the Revenue vs Profit chart (PRD 6, screen 3). */
 productSchema.virtual('margin').get(function margin() {

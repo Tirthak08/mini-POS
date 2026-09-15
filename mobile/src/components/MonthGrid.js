@@ -81,6 +81,8 @@ export default function MonthGrid({ year, month, from, to, maxDate, onPick }) {
                 disabled={disabled}
                 accessibilityRole="button"
                 accessibilityLabel={formatDate(day)}
+                aria-selected={edge || !!inside}
+                aria-disabled={!!disabled}
                 accessibilityState={{ disabled: !!disabled, selected: edge || !!inside }}
                 className="flex-1 items-center py-1"
               >

@@ -28,6 +28,7 @@ export default function SettingsScreen({ navigation }) {
   const counts = useAuthStore((s) => s.counts);
   const logout = useAuthStore((s) => s.logout);
   const language = useSettingsStore((s) => s.language);
+  const lastBackupAt = useSettingsStore((s) => s.lastBackupAt);
 
   const languageLabel = LANGUAGES.find((l) => l.code === language)?.label ?? language;
 
@@ -103,6 +104,16 @@ export default function SettingsScreen({ navigation }) {
             label={t('settings.language')}
             value={languageLabel}
             onPress={() => navigation.navigate('Language')}
+          />
+          {/* Sits with the app's own settings rather than under the shop: it is
+              about this copy of the data, not about the business. The date is
+              the whole point of the row -- a backup nobody has taken for three
+              months should say so from here, without opening it. */}
+          <SettingsRow
+            icon="save-outline"
+            label={t('backup.title')}
+            value={lastBackupAt ? formatDate(lastBackupAt) : t('backup.never')}
+            onPress={() => navigation.navigate('Backup')}
             last
           />
         </SettingsGroup>

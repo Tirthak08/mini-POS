@@ -186,6 +186,7 @@ export default function Select({
                     onPress={() => { onChange(item.value); close(); }}
                     accessibilityRole="button"
                     accessibilityLabel={item.label}
+                    aria-selected={active}
                     accessibilityState={{ selected: active }}
                     style={{ minHeight: 52 }}
                     className={`flex-row items-center px-5 ${active ? 'bg-blue-50' : 'active:bg-slate-100'}`}

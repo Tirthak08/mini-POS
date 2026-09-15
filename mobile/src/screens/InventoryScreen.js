@@ -20,11 +20,12 @@ import { confirm, promptNumber } from '../store/confirmStore';
 import { pickAndUploadImage, deleteImage } from '../utils/imageUpload';
 import { formatINR, round2, relativeAge } from '../utils/money';
 import { chartPalette } from '../theme';
+import { UNITS, DEFAULT_UNIT, allowsFraction, formatQty, sanitiseQty } from '../utils/units';
 import { useScrollTopOnFocus } from '../hooks/useScrollTopOnFocus';
 
-const EMPTY_PRODUCT = { name: '', categoryId: '', price: '', cost: '', stock: '', imageId: null, imageUrl: null, localUri: null };
+const EMPTY_PRODUCT = { name: '', categoryId: '', price: '', cost: '', stock: '', unit: DEFAULT_UNIT, imageId: null, imageUrl: null, localUri: null };
 
-export default function InventoryScreen() {
+export default function InventoryScreen({ navigation }) {
   const { t } = useTranslation();
   const [tab, setTab] = useState('products');
 
@@ -211,6 +212,7 @@ export default function InventoryScreen() {
             price: String(product.price ?? ''),
             cost: String(product.cost ?? ''),
             stock: String(product.stock ?? ''),
+            unit: product.unit ?? DEFAULT_UNIT,
             imageId: product.imageId ?? null,
             imageUrl: product.imageUrl ?? null,
             localUri: null,
@@ -233,6 +235,7 @@ export default function InventoryScreen() {
       categoryId: prodForm.categoryId,
       price: Number(prodForm.price),
       cost: prodForm.cost === '' ? 0 : Number(prodForm.cost),
+      unit: prodForm.unit ?? DEFAULT_UNIT,
       stock: prodForm.stock === '' ? 0 : Number(prodForm.stock),
       // Always sent, so clearing a photo (null) is as explicit as setting one.
       imageId: prodForm.imageId,
@@ -292,7 +295,7 @@ export default function InventoryScreen() {
   const promptRestock = async (product) => {
     const delta = await promptNumber({
       title: t('inventory.restock'),
-      message: `${product.name} — ${t('inventory.stock')}: ${product.stock}`,
+      message: `${product.name} — ${t('inventory.stock')}: ${formatQty(product.stock, product.unit)}`,
       label: t('inventory.addStockAmount'),
       confirmLabel: t('common.add'),
     });
@@ -376,8 +379,8 @@ export default function InventoryScreen() {
 
           <View className="flex-row items-center">
             {out ? <Badge label={t('inventory.outOfStock')} tone="danger" />
-              : low ? <Badge label={`${item.stock} ${t('pos.left')}`} tone="warning" />
-              : <Badge label={`${item.stock}`} tone="success" />}
+              : low ? <Badge label={`${formatQty(item.stock, item.unit)} ${t('pos.left')}`} tone="warning" />
+              : <Badge label={formatQty(item.stock, item.unit)} tone="success" />}
             <Pressable
               onPress={() => promptRestock(item)} hitSlop={8} className="ml-2 p-1"
               accessibilityRole="button" accessibilityLabel={`${t('inventory.restock')} ${item.name}`}
@@ -433,6 +436,7 @@ export default function InventoryScreen() {
           onPress={() => setLowOnly((v) => !v)}
           accessibilityRole="button"
           accessibilityLabel={t('inventory.runningLow')}
+          aria-pressed={lowOnly}
           accessibilityState={{ selected: lowOnly }}
         >
           <StatTile
@@ -461,7 +465,23 @@ export default function InventoryScreen() {
   );
 
   return (
-    <Screen title={t('inventory.title')}>
+    <Screen
+      title={t('inventory.title')}
+      right={
+        /* The count lives here rather than on Settings: it is a stock job, and
+           this is the screen you are already on when you notice the numbers are
+           wrong. */
+        <Pressable
+          onPress={() => navigation.navigate('Stocktake')}
+          hitSlop={6}
+          className="ml-1 h-9 w-9 items-center justify-center rounded-full bg-white/15 active:bg-white/25"
+          accessibilityRole="button"
+          accessibilityLabel={t('stocktake.title')}
+        >
+          <Ionicons name="clipboard-outline" size={19} color="#FFFFFF" />
+        </Pressable>
+      }
+    >
       <View className="flex-row gap-2 px-4 py-3">
         {[
           { key: 'products', label: `${t('inventory.productsTab')} (${products.length})` },
@@ -470,6 +490,15 @@ export default function InventoryScreen() {
           <Pressable
             key={key}
             onPress={() => setTab(key)}
+            /* Role "button" rather than "tab", matching the Sales screen: the
+               bottom bar already owns the tab role. Without ANY role these two
+               were invisible to a screen reader -- the control that decides
+               what the whole screen shows could not be found or operated, and
+               nothing said which of them was selected. */
+            accessibilityRole="button"
+            accessibilityLabel={label}
+            aria-selected={tab === key}
+            accessibilityState={{ selected: tab === key }}
             className={`flex-1 items-center rounded-xl border py-2.5 ${tab === key ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'}`}
           >
             <Text className={`text-sm font-semibold ${tab === key ? 'text-white' : 'text-slate-600'}`}>{label}</Text>
@@ -683,13 +712,38 @@ export default function InventoryScreen() {
           </View>
         </View>
 
-        <TextField
-          label={t('inventory.stock')}
-          value={prodForm.stock}
-          onChangeText={(stock) => setProdForm((f) => ({ ...f, stock }))}
-          mode="integer"
-          placeholder="0"
-        />
+        <View className="flex-row gap-3">
+          <View className="flex-1">
+            {/* The unit sits BESIDE the stock, not in its own row, because the
+                two are one thought: "40 kg". Apart, the operator sets a stock
+                of 40 and only later discovers the app thinks it is 40 pieces. */}
+            <Select
+              label={t('inventory.unit')}
+              value={prodForm.unit ?? DEFAULT_UNIT}
+              options={UNITS.map((u) => ({ value: u, label: t(`units.${u}`) }))}
+              onChange={(unit) => setProdForm((f) => ({
+                ...f,
+                unit,
+                // Switching to a countable unit cannot leave a fraction behind:
+                // the server refuses it, and silently rounding the operator's
+                // number would be worse than making them retype it.
+                stock: allowsFraction(unit) ? f.stock : sanitiseQty(f.stock, unit),
+              }))}
+            />
+          </View>
+          <View className="flex-1">
+            <TextField
+              label={t('inventory.stock')}
+              value={prodForm.stock}
+              onChangeText={(stock) => setProdForm((f) => ({
+                ...f, stock: sanitiseQty(stock, f.unit),
+              }))}
+              mode={allowsFraction(prodForm.unit) ? 'money' : 'integer'}
+              placeholder="0"
+              hint={allowsFraction(prodForm.unit) ? t('inventory.stockFractionHint') : undefined}
+            />
+          </View>
+        </View>
       </FormModal>
     </Screen>
   );

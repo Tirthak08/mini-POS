@@ -5,3 +5,8 @@ export { default as Order } from './Order.js';
 export { default as Counter } from './Counter.js';
 export { default as ProductImage, MAX_IMAGE_BYTES, ALLOWED_TYPES } from './ProductImage.js';
 export { Expense } from './Expense.js';
+export { default as StockMovement, REASONS } from './StockMovement.js';
+export { UNITS, DEFAULT_UNIT, allowsFraction, round3 } from './units.js';
+export { PAYMENT_METHODS } from './Order.js';
+export { default as Customer } from './Customer.js';
+export { default as Payment } from './Payment.js';

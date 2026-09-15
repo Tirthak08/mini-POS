@@ -15,6 +15,10 @@ import SettingsScreen from '../screens/SettingsScreen';
 import BusinessInfoScreen from '../screens/BusinessInfoScreen';
 import LanguageScreen from '../screens/LanguageScreen';
 import SecurityScreen from '../screens/SecurityScreen';
+import StocktakeScreen from '../screens/StocktakeScreen';
+import BackupScreen from '../screens/BackupScreen';
+import CustomersScreen from '../screens/CustomersScreen';
+import CustomerLedgerScreen from '../screens/CustomerLedgerScreen';
 import { useAuthStore } from '../store/authStore';
 import { colors } from '../theme';
 
@@ -25,6 +29,7 @@ const ICONS = {
   Pos: ['cart', 'cart-outline'],
   Inventory: ['cube', 'cube-outline'],
   Sales: ['receipt', 'receipt-outline'],
+  Customers: ['people', 'people-outline'],
   Reports: ['bar-chart', 'bar-chart-outline'],
 };
 
@@ -50,6 +55,10 @@ function MainTabs() {
       <Tab.Screen name="Pos" component={PosScreen} options={{ title: t('tabs.pos') }} />
       <Tab.Screen name="Inventory" component={InventoryScreen} options={{ title: t('tabs.inventory') }} />
       <Tab.Screen name="Sales" component={SalesScreen} options={{ title: t('tabs.sales') }} />
+      {/* A tab, not a corner of Sales. "Who owes me?" is a question a shop asks
+          every single day, and an answer two taps deep inside another screen is
+          one nobody looks at. */}
+      <Tab.Screen name="Customers" component={CustomersScreen} options={{ title: t('tabs.customers') }} />
       <Tab.Screen name="Reports" component={ReportsScreen} options={{ title: t('tabs.reports') }} />
     </Tab.Navigator>
   );
@@ -86,6 +95,13 @@ export default function RootNavigator() {
             <Stack.Screen name="BusinessInfo" component={BusinessInfoScreen} />
             <Stack.Screen name="Language" component={LanguageScreen} />
             <Stack.Screen name="Security" component={SecurityScreen} />
+            {/* Above the tabs for the same reason Settings is: a count in
+                progress must not be one stray tap on "Sell" away from
+                disappearing. The draft survives either way, but the screen
+                should not vanish under the operator's thumb. */}
+            <Stack.Screen name="Stocktake" component={StocktakeScreen} />
+            <Stack.Screen name="Backup" component={BackupScreen} />
+            <Stack.Screen name="CustomerLedger" component={CustomerLedgerScreen} />
           </>
         )}
       </Stack.Navigator>

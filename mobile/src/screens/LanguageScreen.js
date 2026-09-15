@@ -40,7 +40,14 @@ export default function LanguageScreen({ navigation }) {
                 key={lang.code}
                 onPress={() => setAppLanguage(lang.code)}
                 accessibilityRole="radio"
-                accessibilityState={{ selected: active }}
+                /* `aria-checked` rather than accessibilityState alone:
+                   react-native-web drops accessibilityState from a Pressable,
+                   so a screen reader was told these were radios but never which
+                   one was on -- on the one screen an operator who cannot read
+                   the interface has to reach first. `checked`, not `selected`:
+                   that is the state a radio has. */
+                aria-checked={active}
+                accessibilityState={{ checked: active }}
                 accessibilityLabel={lang.label}
                 className={`flex-row items-center bg-white px-4 py-4 active:bg-slate-50 ${
                   i < LANGUAGES.length - 1 ? 'border-b border-slate-100' : ''

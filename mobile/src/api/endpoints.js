@@ -26,8 +26,16 @@ export const productApi = {
   list: (params = {}) => api.get('/products', { params }),
   create: (payload) => api.post('/products', payload),
   update: (id, patch) => api.patch(`/products/${id}`, patch),
+  /** `{delta}` or `{set}`, plus an optional `{reason, note}` for the ledger. */
   adjustStock: (id, body) => api.patch(`/products/${id}/stock`, body),
   remove: (id) => api.delete(`/products/${id}`),
+  /**
+   * A physical count. Send ONLY the products actually counted -- an omitted
+   * product is one nobody looked at, not one with zero on the shelf.
+   */
+  stocktake: (payload) => api.post('/products/stocktake', payload),
+  /** Stock history: ledger adjustments merged with the sales, plus a reconciliation. */
+  movements: (id, params = {}) => api.get(`/products/${id}/movements`, { params }),
 };
 
 export const orderApi = {
@@ -57,6 +65,39 @@ export const reportApi = {
   topProducts: (params) => api.get('/reports/top-products', { params }),
   lowStock: (params) => api.get('/reports/low-stock', { params }),
   exportData: (params) => api.get('/reports/export', { params }),
+};
+
+/**
+ * Udhaar: who owes the shop money, and what they have paid back.
+ *
+ * No balance is ever sent TO the server -- it is derived from receipts and
+ * repayments on every read, so there is nothing here that can disagree with
+ * the sales behind it.
+ */
+export const customerApi = {
+  list: (params = {}) => api.get('/customers', { params }),
+  get: (id, params = {}) => api.get(`/customers/${id}`, { params }),
+  create: (payload) => api.post('/customers', payload),
+  update: (id, patch) => api.patch(`/customers/${id}`, patch),
+  /** force=true writes the debt off; without it a debtor cannot be deleted. */
+  remove: (id, { force = false } = {}) =>
+    api.delete(`/customers/${id}${force ? '?force=true' : ''}`),
+  recordPayment: (id, payload) => api.post(`/customers/${id}/payments`, payload),
+  removePayment: (paymentId) => api.delete(`/payments/${paymentId}`),
+};
+
+/**
+ * A full copy of the shop, and the way back from one.
+ *
+ * Photos are opt-in on export: they are ~60KB each and dwarf everything else.
+ */
+export const backupApi = {
+  status: () => api.get('/backup/status'),
+  export: ({ images = false } = {}) =>
+    api.get(`/backup/export${images ? '?images=1' : ''}`, { timeout: 120000 }),
+  /** mode: 'empty' (refuses if the shop has data) or 'replace' (wipes first). */
+  restore: (backup, { mode = 'empty' } = {}) =>
+    api.post('/backup/restore', { backup, mode }, { timeout: 180000 }),
 };
 
 export const adminApi = {

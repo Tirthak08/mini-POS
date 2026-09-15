@@ -17,7 +17,7 @@ import {
  */
 
 /** Creates (or replaces) a file in the cache directory and returns its uri. */
-function writeCacheFile(filename, content, { base64 = false } = {}) {
+export function writeCacheFile(filename, content, { base64 = false } = {}) {
   const file = new File(Paths.cache, filename);
   if (file.exists) file.delete(); // overwrite a file from an earlier export
   file.create();
@@ -70,20 +70,20 @@ async function saveToDevice(uri, mimeType, filename, dialogTitle) {
 }
 
 /** One place that decides what happens to a finished file. */
-async function deliver(uri, { mimeType, filename, dialogTitle, mode = 'share' }) {
+export async function deliver(uri, { mimeType, filename, dialogTitle, mode = 'share' }) {
   return mode === 'save'
     ? saveToDevice(uri, mimeType, filename, dialogTitle)
     : share(uri, mimeType, dialogTitle);
 }
 
 /** Timestamped so repeated exports do not overwrite each other in the share sheet. */
-function stamp() {
+export function stamp() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
 }
 
-const slug = (s) => String(s || 'shop').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+export const slug = (s) => String(s || 'shop').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
 /* ------------------------------- CSV ------------------------------- */
 

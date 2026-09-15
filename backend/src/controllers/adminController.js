@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { Business, Category, Product, Order, Counter, ProductImage, toSlug } from '../models/index.js';
+import { Business, Category, Product, Order, Counter, ProductImage, StockMovement, Expense, Customer, Payment, toSlug } from '../models/index.js';
 import { ApiError } from '../utils/ApiError.js';
 import { round2 } from '../utils/validators.js';
 import { isTransactionUnsupported } from '../utils/txnSupport.js';
@@ -163,6 +163,7 @@ export async function deleteBusiness(req, res) {
     const products = await Product.softDeleteMany({ businessId }, { by, session });
     const categories = await Category.softDeleteMany({ businessId }, { by, session });
     const images = await ProductImage.softDeleteMany({ businessId }, { by, session });
+    await StockMovement.softDeleteMany({ businessId }, { by, session });
     await Business.softDeleteMany({ businessId }, { by, session });
     return {
       orders: orders.modifiedCount || 0,
@@ -232,6 +233,7 @@ export async function restoreBusiness(req, res) {
     const products = await Product.restoreMany({ businessId, deletedBy: by }, { session });
     const categories = await Category.restoreMany({ businessId, deletedBy: by }, { session });
     await ProductImage.restoreMany({ businessId, deletedBy: by }, { session });
+    await StockMovement.restoreMany({ businessId, deletedBy: by }, { session });
     await Business.updateOne(
       { businessId },
       { deletedAt: null, deletedBy: null, name, slug: toSlug(name) },
@@ -278,6 +280,13 @@ export async function purgeBusiness(req, res) {
     const categories = await Category.hardDeleteMany({ businessId }, { session });
     // Image bytes are the only rows with real storage cost -- always reclaim them.
     const images = await ProductImage.hardDeleteMany({ businessId }, { session });
+    const movements = await StockMovement.hardDeleteMany({ businessId }, { session });
+    // Expenses were being left behind entirely: they are scoped by businessId
+    // like everything else, so a purge that skipped them left rows nothing
+    // could ever read or delete again.
+    const expenses = await Expense.hardDeleteMany({ businessId }, { session });
+    const payments = await Payment.hardDeleteMany({ businessId }, { session });
+    const customers = await Customer.hardDeleteMany({ businessId }, { session });
     await Business.deleteMany({ businessId }, { withDeleted: true, ...(session && { session }) });
     await Counter.deleteMany({ _id: `${businessId}:order` }, { ...(session && { session }) });
     return {
@@ -285,6 +294,10 @@ export async function purgeBusiness(req, res) {
       products: products.deletedCount || 0,
       categories: categories.deletedCount || 0,
       images: images.deletedCount || 0,
+      movements: movements.deletedCount || 0,
+      expenses: expenses.deletedCount || 0,
+      payments: payments.deletedCount || 0,
+      customers: customers.deletedCount || 0,
       business: 1,
     };
   });

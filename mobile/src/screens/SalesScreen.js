@@ -6,6 +6,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useTranslation } from 'react-i18next';
 
 import Screen from '../components/Screen';
+import QueueBanner from '../components/QueueBanner';
 import Button from '../components/Button';
 import TextField from '../components/TextField';
 import EmptyState from '../components/EmptyState';
@@ -256,6 +257,10 @@ export default function SalesScreen() {
 
   return (
     <Screen title={t('sales.title')}>
+      {/* Also here, because this is the screen someone opens to ask "did that
+          sale go through?" — and a receipt that is not in the list yet has to
+          be explained on the list's own screen. */}
+      <QueueBanner className="mt-3" />
       {/* Money in / money out. The segment sits ABOVE the period filter because
           it decides what you are looking at; the filter then narrows it. */}
       <View className="flex-row gap-2 px-4 pt-3">
@@ -273,6 +278,10 @@ export default function SalesScreen() {
                  second tab of the same name makes both ambiguous to a screen
                  reader (and to any automation driving the app). */
               accessibilityRole="button"
+              /* aria-selected as well as accessibilityState: react-native-web
+                 drops accessibilityState on a Pressable entirely, so which of
+                 the two was chosen existed only as a colour. */
+              aria-selected={active}
               accessibilityState={{ selected: active }}
               accessibilityLabel={label}
               className={`flex-1 flex-row items-center justify-center rounded-xl border py-2.5 ${

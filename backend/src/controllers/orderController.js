@@ -1,7 +1,95 @@
 import mongoose from 'mongoose';
-import { Order, Product, Counter } from '../models/index.js';
+import { Order, Product, Counter, Customer } from '../models/index.js';
 import { ApiError } from '../utils/ApiError.js';
-import { assertObjectId, toAmount, toCount, round2, parseDateRange } from '../utils/validators.js';
+import { assertObjectId, toAmount, toCount, toQty, round2, parseDateRange } from '../utils/validators.js';
+import { allowsFraction, round3, DEFAULT_UNIT } from '../models/units.js';
+import { PAYMENT_METHODS } from '../models/Order.js';
+
+/**
+ * A quantity cannot be fully judged until the product is known -- whether a
+ * fraction is legal depends on how that product is measured. So parsing happens
+ * in two steps: shape and range as the cart is read, unit-legality once the
+ * products have been loaded.
+ */
+function assertQtyFitsUnit(qty, product, field) {
+  const unit = product?.unit ?? DEFAULT_UNIT;
+  if (allowsFraction(unit) || Number.isInteger(qty)) return qty;
+  throw ApiError.badRequest(
+    `"${product.name}" is sold in ${unit}, so the quantity must be a whole number`,
+    { [field]: 'must be a whole number for this unit' }
+  );
+}
+
+/**
+ * The client's id for this sale, if it sent one. Validated here rather than
+ * left to the schema so a malformed ref fails before any stock moves.
+ */
+function toClientRef(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const ref = String(value).trim();
+  if (!/^[A-Za-z0-9._:-]{8,64}$/.test(ref)) {
+    throw ApiError.badRequest('clientRef must be 8-64 characters of A-Z a-z 0-9 . _ : -', {
+      clientRef: 'malformed',
+    });
+  }
+  return ref;
+}
+
+/** An order already written for this ref, deleted ones included. */
+async function findByClientRef(businessId, clientRef) {
+  if (!clientRef) return null;
+  return Order.findOne({ businessId, clientRef }).withDeleted();
+}
+
+/**
+ * Resolves the customer a sale is for, and how much of it was actually paid.
+ *
+ * Credit without a named customer is refused. A walk-in who underpays is not a
+ * debt -- there is nobody to collect from -- so accepting it would create a
+ * receivable that can never be settled and would sit in the shop's totals
+ * forever.
+ */
+async function resolveCustomer(businessId, body, grandTotal) {
+  let customer = null;
+  if (body?.customerId) {
+    const id = assertObjectId(body.customerId, 'customerId');
+    customer = await Customer.findOne({ _id: id, businessId }).lean();
+    if (!customer) {
+      throw ApiError.badRequest('That customer does not belong to this business', {
+        customerId: 'not found',
+      });
+    }
+  }
+
+  if (body?.amountPaid === undefined || body?.amountPaid === null || body?.amountPaid === '') {
+    return { customer, amountPaid: undefined };
+  }
+
+  const amountPaid = toAmount(body.amountPaid, 'amountPaid');
+  if (amountPaid > grandTotal) {
+    throw ApiError.badRequest('Paid more than the bill. Use extra charges or a discount instead.', {
+      amountPaid: `must be <= ${grandTotal}`,
+    });
+  }
+  if (amountPaid < grandTotal && !customer) {
+    throw ApiError.badRequest(
+      'A part-paid sale has to name a customer, or there is nobody to collect from.',
+      { customerId: 'required when amountPaid is less than the total' }
+    );
+  }
+  return { customer, amountPaid };
+}
+
+function toPaymentMethod(value) {
+  if (value === undefined || value === null || value === '') return 'cash';
+  const m = String(value).trim().toLowerCase();
+  if (!PAYMENT_METHODS.includes(m)) {
+    throw ApiError.badRequest(`"${value}" is not a payment method`, {
+      paymentMethod: `must be one of: ${PAYMENT_METHODS.join(', ')}`,
+    });
+  }
+  return m;
+}
 import { isTransactionUnsupported } from '../utils/txnSupport.js';
 
 /**
@@ -49,7 +137,7 @@ async function buildLines(businessId, rawItems) {
   const merged = new Map();
   for (const [i, raw] of rawItems.entries()) {
     const productId = assertObjectId(raw?.productId, `items[${i}].productId`);
-    const qty = toCount(raw?.qty ?? 1, `items[${i}].qty`, { required: true, min: 1, max: 100_000 });
+    const qty = toQty(raw?.qty ?? 1, `items[${i}].qty`, { required: true, min: 0.001, max: 100_000 });
     const discount = toAmount(raw?.discount, `items[${i}].discount`);
     // undefined means "charge the catalogue price"; 0 is a legitimate giveaway
     // and must not be confused with it.
@@ -60,7 +148,9 @@ async function buildLines(businessId, rawItems) {
     merged.set(productId, prev
       ? {
         productId,
-        qty: prev.qty + qty,
+        // round3 on the way in: 0.1 + 0.2 is 0.30000000000000004, and a
+        // quantity that cannot be printed is a quantity nobody trusts.
+        qty: round3(prev.qty + qty),
         discount: round2(prev.discount + discount),
         price: price ?? prev.price,
       }
@@ -83,6 +173,7 @@ async function buildLines(businessId, rawItems) {
 
   for (const cart of merged.values()) {
     const p = byId.get(cart.productId);
+    assertQtyFitsUnit(cart.qty, p, 'qty');
     if (p.stock < cart.qty) {
       outOfStock.push({ productId: cart.productId, name: p.name, requested: cart.qty, available: p.stock });
       continue;
@@ -99,6 +190,7 @@ async function buildLines(businessId, rawItems) {
       productId: p._id,
       name: p.name,
       qty: cart.qty,
+      unit: p.unit ?? DEFAULT_UNIT,
       price,
       listPrice,
       cost: p.cost ?? 0,
@@ -172,6 +264,18 @@ async function persistWithCompensation(businessId, lines, payload) {
 /** POST /api/orders  { customerName?, extraCharges?, items:[{productId, qty, discount?}] } */
 export async function checkout(req, res) {
   const businessId = req.businessId;
+  const clientRef = toClientRef(req.body?.clientRef);
+
+  /**
+   * Checked BEFORE the cart is priced or any stock moves. A replayed sale must
+   * cost nothing and change nothing -- it is the same sale arriving twice, not
+   * a second one.
+   */
+  const already = await findByClientRef(businessId, clientRef);
+  if (already) {
+    return res.status(200).json({ ok: true, order: already, duplicate: true });
+  }
+
   const lines = await buildLines(businessId, req.body?.items);
 
   // Gross, then the discount shown as its own deduction -- the schema's
@@ -179,31 +283,62 @@ export async function checkout(req, res) {
   const subtotal = round2(lines.reduce((s, l) => s + round2(l.qty * l.price), 0));
   const discountTotal = round2(lines.reduce((s, l) => s + (l.discount || 0), 0));
   const extraCharges = toAmount(req.body?.extraCharges, 'extraCharges');
+  // Settled before the customer is resolved, because what counts as a PARTIAL
+  // payment cannot be judged without knowing the whole bill.
+  const grandTotal = round2(Math.max(0, subtotal - discountTotal + extraCharges));
+
+  const { customer, amountPaid } = await resolveCustomer(businessId, req.body, grandTotal);
 
   const payload = {
     businessId,
-    customerName: String(req.body?.customerName || '').trim() || 'Walk-in',
+    customerId: customer?._id ?? null,
+    // The customer's own name wins over anything typed: a sale filed under a
+    // ledger has to read the same as the ledger it is filed under.
+    customerName: customer?.name
+      || String(req.body?.customerName || '').trim()
+      || 'Walk-in',
+    ...(amountPaid !== undefined && { amountPaid }),
+    paymentMethod: toPaymentMethod(req.body?.paymentMethod),
+    ...(clientRef && { clientRef }),
     items: lines,
     subtotal,
     discountTotal,
     extraCharges,
-    grandTotal: round2(Math.max(0, subtotal - discountTotal + extraCharges)),
+    grandTotal,
     timestamp: new Date(),
   };
 
   let order;
-  if (txnSupported === false) {
-    order = await persistWithCompensation(businessId, lines, payload);
-  } else {
-    try {
-      order = await persistInTransaction(businessId, lines, payload);
-      txnSupported = true;
-    } catch (err) {
-      if (err instanceof ApiError || !isTransactionUnsupported(err)) throw err;
-      console.warn('Transactions unavailable on this MongoDB; using compensating writes.');
-      txnSupported = false;
+  try {
+    if (txnSupported === false) {
       order = await persistWithCompensation(businessId, lines, payload);
+    } else {
+      try {
+        order = await persistInTransaction(businessId, lines, payload);
+        txnSupported = true;
+      } catch (err) {
+        if (err instanceof ApiError || !isTransactionUnsupported(err)) throw err;
+        console.warn('Transactions unavailable on this MongoDB; using compensating writes.');
+        txnSupported = false;
+        order = await persistWithCompensation(businessId, lines, payload);
+      }
     }
+  } catch (err) {
+    /**
+     * Two replays of the same queued sale can arrive close enough together
+     * that both pass the check above. The unique index settles it, and the
+     * loser returns the winner's receipt rather than an error the operator
+     * cannot act on -- the sale IS recorded, just not by this request.
+     *
+     * Stock is safe either way: the loser's transaction rolled back, and on the
+     * compensating path its decrements are put back by the same handler that
+     * covers any other failed write.
+     */
+    if (err?.code === 11000 && clientRef) {
+      const winner = await findByClientRef(businessId, clientRef);
+      if (winner) return res.status(200).json({ ok: true, order: winner, duplicate: true });
+    }
+    throw err;
   }
 
   res.status(201).json({ ok: true, order });
@@ -235,7 +370,7 @@ async function rebuildLines(businessId, rawItems, order) {
   const merged = new Map();
   for (const [i, raw] of rawItems.entries()) {
     const productId = assertObjectId(raw?.productId, `items[${i}].productId`);
-    const qty = toCount(raw?.qty ?? 1, `items[${i}].qty`, { required: true, min: 1, max: 100_000 });
+    const qty = toQty(raw?.qty ?? 1, `items[${i}].qty`, { required: true, min: 0.001, max: 100_000 });
     const discount = toAmount(raw?.discount, `items[${i}].discount`);
     const price = raw?.price === undefined || raw?.price === null || raw?.price === ''
       ? undefined
@@ -244,7 +379,9 @@ async function rebuildLines(businessId, rawItems, order) {
     merged.set(productId, prev
       ? {
         productId,
-        qty: prev.qty + qty,
+        // round3 on the way in: 0.1 + 0.2 is 0.30000000000000004, and a
+        // quantity that cannot be printed is a quantity nobody trusts.
+        qty: round3(prev.qty + qty),
         discount: round2(prev.discount + discount),
         price: price ?? prev.price,
       }
@@ -275,6 +412,8 @@ async function rebuildLines(businessId, rawItems, order) {
     // What the catalogue said when this line was first sold. For a line added
     // during the correction there is no such history, so today's price is it.
     const listPrice = snapshot ? (snapshot.listPrice ?? snapshot.price) : source.price;
+    const unit = snapshot ? (snapshot.unit ?? DEFAULT_UNIT) : (source.unit ?? DEFAULT_UNIT);
+    assertQtyFitsUnit(cart.qty, { name, unit }, 'qty');
 
     const gross = round2(price * cart.qty);
     const discount = Math.min(cart.discount, gross); // PRD 7, edge case 2
@@ -282,6 +421,7 @@ async function rebuildLines(businessId, rawItems, order) {
       productId: snapshot ? snapshot.productId : source._id,
       name,
       qty: cart.qty,
+      unit,
       price,
       listPrice,
       cost,
@@ -372,9 +512,17 @@ export async function updateOrder(req, res) {
   const hasItems = req.body?.items !== undefined;
   const hasCustomer = req.body?.customerName !== undefined;
   const hasCharges = req.body?.extraCharges !== undefined;
-  if (!hasItems && !hasCustomer && !hasCharges) {
-    throw ApiError.badRequest('Nothing to update -- send customerName, extraCharges and/or items');
+  const hasPayment = req.body?.paymentMethod !== undefined;
+  const hasPaid = req.body?.amountPaid !== undefined;
+  const hasCustomerId = req.body?.customerId !== undefined;
+  if (!hasItems && !hasCustomer && !hasCharges && !hasPayment && !hasPaid && !hasCustomerId) {
+    throw ApiError.badRequest(
+      'Nothing to update -- send customerName, customerId, amountPaid, paymentMethod, extraCharges and/or items'
+    );
   }
+  // Validated before anything is written: "it was UPI, not cash" is the most
+  // ordinary correction there is, and getting it wrong must not cost the edit.
+  const paymentMethod = hasPayment ? toPaymentMethod(req.body.paymentMethod) : null;
 
   const oldLines = order.items.map((i) => ({ productId: i.productId, qty: i.qty, name: i.name }));
   const newLines = hasItems ? await rebuildLines(businessId, req.body.items, order) : null;
@@ -387,6 +535,42 @@ export async function updateOrder(req, res) {
     }
     if (hasCustomer) order.customerName = String(req.body.customerName).trim() || 'Walk-in';
     if (hasCharges) order.extraCharges = toAmount(req.body.extraCharges, 'extraCharges');
+    if (hasPayment) order.paymentMethod = paymentMethod;
+
+    /**
+     * "They paid the rest" and "that was actually for Ramesh" are both ordinary
+     * corrections, so both are editable. Order matters: the customer has to be
+     * attached before the amount is judged, or moving a walk-in sale onto a
+     * ledger and part-paying it in one edit would be refused.
+     */
+    if (hasCustomerId) {
+      if (req.body.customerId === null || req.body.customerId === '') {
+        order.customerId = null;
+      } else {
+        const id = assertObjectId(req.body.customerId, 'customerId');
+        const customer = await Customer.findOne({ _id: id, businessId }).lean();
+        if (!customer) {
+          throw ApiError.badRequest('That customer does not belong to this business', {
+            customerId: 'not found',
+          });
+        }
+        order.customerId = customer._id;
+        order.customerName = customer.name;
+      }
+    }
+
+    if (hasPaid) {
+      const paid = req.body.amountPaid === null || req.body.amountPaid === ''
+        ? undefined
+        : toAmount(req.body.amountPaid, 'amountPaid');
+      if (paid !== undefined && paid < order.grandTotal && !order.customerId) {
+        throw ApiError.badRequest(
+          'A part-paid sale has to name a customer, or there is nobody to collect from.',
+          { customerId: 'required when amountPaid is less than the total' }
+        );
+      }
+      order.amountPaid = paid;
+    }
 
     order.editedAt = new Date();
     order.editCount = (order.editCount || 0) + 1;

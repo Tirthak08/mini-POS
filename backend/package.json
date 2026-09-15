@@ -19,7 +19,13 @@
     "db:dupes": "node src/utils/findDuplicates.js",
     "test:pricing": "node tests/pricing-and-dupes.mjs",
     "db:images": "node src/utils/reclaimImages.js",
-    "test:images": "node tests/image-lifecycle.mjs"
+    "test:images": "node tests/image-lifecycle.mjs",
+    "db:backfill": "node src/utils/backfillMovements.js",
+    "test:stock": "node tests/stocktake.mjs",
+    "test:backup": "node tests/backup.mjs",
+    "test:units": "node tests/units-and-payments.mjs",
+    "test:idem": "node tests/idempotent-checkout.mjs",
+    "test:udhaar": "node tests/udhaar.mjs"
   },
   "keywords": [
     "pos",

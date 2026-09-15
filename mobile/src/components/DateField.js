@@ -53,6 +53,7 @@ export default function DateField({ label, value, onChange, hint }) {
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
+      aria-selected={active}
       accessibilityState={{ selected: active }}
       accessibilityLabel={accessibilityLabel}
       className={`flex-1 flex-row items-center justify-center rounded-xl border py-2.5 ${

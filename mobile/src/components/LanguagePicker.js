@@ -28,6 +28,7 @@ export default function LanguagePicker({ onDark = false }) {
             onPress={() => setAppLanguage(lang.code)}
             accessibilityRole="button"
             accessibilityLabel={lang.label}
+            aria-selected={active}
             accessibilityState={{ selected: active }}
             className={`px-2.5 py-1.5 ${
               onDark

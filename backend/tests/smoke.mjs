@@ -536,9 +536,17 @@ try {
     check('revenue is a positive number', s.body?.sales?.revenue > 0, s.body?.sales);
     check('stock valuation present', typeof s.body?.inventory?.stockValueAtCost === 'number', s.body?.inventory);
 
-    // Relative dates: a fixed '2026-08-18' froze the test in time -- it started
-    // failing at midnight on the 19th because "today's" sale left the window.
-    const isoDay = (d) => d.toISOString().slice(0, 10);
+    /**
+     * Relative dates: a fixed '2026-08-18' froze the test in time -- it started
+     * failing at midnight on the 19th because "today's" sale left the window.
+     *
+     * And then relative-in-UTC was wrong too, in a way that only showed up
+     * between 18:30 and midnight UTC: the report buckets by REPORT_TIMEZONE
+     * (Asia/Kolkata), so after 18:30 UTC the sale lands in tomorrow's IST
+     * bucket while the requested range still ends at today's UTC date. The day
+     * has to be computed in the same timezone the report groups by.
+     */
+    const isoDay = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
     const trendTo = new Date();
     const trendFrom = new Date(trendTo.getTime() - 17 * 864e5);
     const t = await api('GET', `/reports/sales-trend?from=${isoDay(trendFrom)}&to=${isoDay(trendTo)}`, { token: tokenA });

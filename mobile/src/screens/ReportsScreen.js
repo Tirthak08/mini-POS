@@ -224,6 +224,38 @@ export default function ReportsScreen() {
   const grossProfit = sales?.grossProfit ?? sales?.profit ?? 0;
   const expenses = sales?.expenses ?? 0;
   const netProfit = sales?.netProfit ?? grossProfit - expenses;
+  /**
+   * Absent on a server that predates payment methods, so the card simply does
+   * not render rather than showing an empty box or a zero that looks like a
+   * shop that took no money.
+   */
+  const payments = data?.summary?.payments ?? [];
+  /**
+   * Deliberately NOT part of the period figures above it: a debt is outstanding
+   * until it is paid, and a number that shrank every time the date filter
+   * narrowed would mean something nobody asked for.
+   */
+  const receivables = data?.summary?.receivables ?? null;
+  const hasReceivables = Boolean(receivables && (receivables.owed > 0 || receivables.owing > 0));
+
+  /**
+   * Rendered in both branches below, because it is the one figure on this
+   * screen that the date filter does not own. A shop with nothing sold
+   * yesterday still has money on the street today, and hiding the tile behind
+   * the "no sales in this period" empty state made the amount owed disappear
+   * on a filter that has nothing to do with it.
+   */
+  const receivablesTile = hasReceivables ? (
+    <View className="mt-3 flex-row gap-2">
+      <StatTile
+        className="flex-1"
+        label={t('reports.onTheStreet')}
+        value={formatINR(receivables.owed)}
+        sub={t('reports.onTheStreetHint', { count: receivables.owing })}
+        tone={receivables.owed > 0 ? 'negative' : 'default'}
+      />
+    </View>
+  ) : null;
 
   const chartWidth = width - 56; // screen minus card padding, with room for the last x label
 
@@ -299,7 +331,10 @@ export default function ReportsScreen() {
         {loading ? <Loading label={t('common.loading')} /> : null}
 
         {loading ? null : !hasSales ? (
-          <EmptyState icon="bar-chart-outline" title={t('reports.noData')} hint={t('reports.noDataHint')} />
+          <>
+            {receivablesTile ? <View className="mt-1 px-4">{receivablesTile}</View> : null}
+            <EmptyState icon="bar-chart-outline" title={t('reports.noData')} hint={t('reports.noDataHint')} />
+          </>
         ) : (
           <>
             {/* -------------------- KPI tiles -------------------- */}
@@ -341,6 +376,43 @@ export default function ReportsScreen() {
                   tone={netProfit >= 0 ? 'positive' : 'negative'}
                 />
               </View>
+              {receivablesTile}
+
+              {/* How the takings actually arrived.
+                  Directly under the money tiles because it answers a question
+                  the tiles above provoke and cannot settle: revenue of ₹8,000
+                  does not tell you what should be in the drawer tonight. */}
+              {payments.length ? (
+                <View className="mt-3 rounded-2xl border border-slate-200 bg-white p-3">
+                  <Text className="text-xs font-semibold text-slate-600">{t('reports.paidBy')}</Text>
+                  {/* Spelled out because it is NOT revenue: a sale on credit
+                      contributes only what was handed over, and a customer
+                      settling an old debt contributes money that belongs to no
+                      sale in this period. */}
+                  <Text className="mb-2 text-[11px] text-slate-400">
+                    {t('reports.paidByHint', { amount: formatINR(data?.summary?.received ?? 0) })}
+                  </Text>
+                  {payments.map((p, i) => (
+                    <View
+                      key={p.method}
+                      className={`flex-row items-center justify-between py-1.5 ${i === payments.length - 1 ? '' : 'border-b border-slate-100'}`}
+                    >
+                      <View className="flex-row items-center">
+                        <Text className="text-sm text-slate-700">{t(`pos.pay_${p.method}`)}</Text>
+                        <Text className="ml-2 text-xs text-slate-400">
+                          {t('reports.ordersShort', { count: p.orders })}
+                          {p.repayments ? ` + ${t('reports.repaymentsShort', { count: p.repayments })}` : ''}
+                        </Text>
+                      </View>
+                      <View className="flex-row items-baseline">
+                        <Text className="text-sm font-bold text-slate-900">{formatINR(p.amount)}</Text>
+                        <Text className="ml-2 text-xs text-slate-400">{p.sharePercent}%</Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+
               <View className="mt-2 flex-row gap-2">
                 <StatTile className="flex-1" label={t('reports.orders')} value={String(sales.orders)} />
                 <StatTile className="flex-1" label={t('reports.avgOrder')} value={formatINR(sales.averageOrderValue)} />
@@ -573,6 +645,7 @@ export default function ReportsScreen() {
                     key={key}
                     onPress={() => setExportMode(key)}
                     accessibilityRole="button"
+                    aria-selected={active}
                     accessibilityState={{ selected: active }}
                     accessibilityLabel={label}
                     className={`flex-1 flex-row items-center justify-center rounded-xl border py-2.5 ${

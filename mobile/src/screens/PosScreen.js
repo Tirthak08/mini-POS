@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { FlatList, Modal, Pressable, Text, View } from 'react-native';
+import { FlatList, Modal, Pressable, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
@@ -10,12 +10,17 @@ import Button from '../components/Button';
 import Select from '../components/Select';
 import TextField from '../components/TextField';
 import EmptyState from '../components/EmptyState';
+import FormModal from '../components/FormModal';
 import ProductImage from '../components/ProductImage';
 import { useScrollTopOnFocus } from '../hooks/useScrollTopOnFocus';
 import QuantityStepper from '../components/QuantityStepper';
 import ProductPreview from '../components/ProductPreview';
 import Loading, { ErrorBanner, StaleBanner } from '../components/Loading';
 import { useInventoryStore } from '../store/inventoryStore';
+import { useQueueStore } from '../store/queueStore';
+import { useCustomerStore } from '../store/customerStore';
+import QueueBanner from '../components/QueueBanner';
+import { makeClientRef, classifyFailure } from '../utils/salesQueue';
 import {
   useCartStore, selectItemCount, selectGross, selectGrandTotal, selectTotalDiscount, lineGross,
   unitPrice, isRepriced,
@@ -24,6 +29,8 @@ import { useAuthStore } from '../store/authStore';
 import { orderApi } from '../api/endpoints';
 import { toast } from '../store/uiStore';
 import { formatINR, relativeAge, round2 } from '../utils/money';
+import { allowsFraction, formatQty, sanitiseQty, DEFAULT_UNIT } from '../utils/units';
+import { PAYMENT_METHODS } from '../utils/payments';
 import { shareReceipt } from '../utils/receipt';
 import { confirm } from '../store/confirmStore';
 
@@ -42,6 +49,17 @@ export default function PosScreen() {
   const [activeCategory, setActiveCategory] = useState('all');
   const [search, setSearch] = useState('');
   const [cartOpen, setCartOpen] = useState(false);
+  const [customerPicker, setCustomerPicker] = useState(false);
+
+  /**
+   * Loaded once, not on every cart open: the picker is a convenience and the
+   * balances on it are advisory. The number that decides anything -- what the
+   * customer owes after this sale -- comes from the server when the ledger is
+   * next read.
+   */
+  const ledgerCustomers = useCustomerStore((s) => s.customers);
+  const loadCustomers = useCustomerStore((s) => s.load);
+  useEffect(() => { loadCustomers({ silent: true }); }, [loadCustomers]);
   // The product grid. The cart list lives in a modal and is short-lived, so it
   // has no stale offset to reset.
   const gridRef = useScrollTopOnFocus();
@@ -67,6 +85,15 @@ export default function PosScreen() {
   useFocusEffect(
     useCallback(() => {
       if (useInventoryStore.getState().loadedAt) loadAll({ silent: true });
+      /**
+       * Coming back to the till is the moment to try again. The operator has
+       * usually just walked somewhere with signal, and a queue that only
+       * drained when somebody remembered to press a button would mostly not
+       * drain at all.
+       */
+      useQueueStore.getState().sync().then((res) => {
+        if (res?.synced) loadAll({ silent: true });
+      });
     }, [loadAll])
   );
 
@@ -104,9 +131,20 @@ export default function PosScreen() {
 
   const checkout = async () => {
     if (!cart.items.length) return;
+    /**
+     * Minted BEFORE the first attempt, not after a failure.
+     *
+     * A request that timed out may well have been applied -- it is the REPLY
+     * that got lost -- so the retry has to be recognisable as the same sale.
+     * Generating the ref only when queueing would leave exactly that case
+     * unprotected, and it is the case that charges a customer twice.
+     */
+    const payload = { ...cart.toOrderPayload(), clientRef: makeClientRef() };
+    const queuedTotal = grandTotal;
+
     setPlacing(true);
     try {
-      const res = await orderApi.checkout(cart.toOrderPayload());
+      const res = await orderApi.checkout(payload);
       applySoldItems(res.order.items);
       cart.clear();
       setCartOpen(false);
@@ -129,6 +167,27 @@ export default function PosScreen() {
         }
       }
     } catch (err) {
+      /**
+       * The phone could not reach the server. The customer is standing there
+       * and the sale is real, so it is taken, kept on disk, and sent later --
+       * which is the whole reason this app is usable on a shop's data plan and
+       * against a backend that sleeps after fifteen minutes.
+       */
+      if (classifyFailure(err) === 'queue') {
+        const queued = useQueueStore.getState().enqueue(payload, { total: queuedTotal });
+        if (!queued.ok) {
+          toast.error(t('queue.full'));
+          return;
+        }
+        // The grid has to reflect what left the shelf, or the next customer is
+        // sold stock that is already in a bag by the door.
+        applySoldItems(payload.items);
+        cart.clear();
+        setCartOpen(false);
+        toast.success(`${t('queue.savedOffline')} — ${formatINR(queuedTotal)}`);
+        return;
+      }
+
       // 409 means someone else sold the stock first; resync so the grid is honest.
       if (err.status === 409) {
         const names = (err.details?.outOfStock ?? []).map((o) => o.name).filter(Boolean).join(', ');
@@ -236,7 +295,28 @@ export default function PosScreen() {
           >
             <Ionicons name="remove" size={18} color="#334155" />
           </Pressable>
-          <Text className="mx-3 min-w-[24px] text-center text-base font-bold text-slate-900">{item.qty}</Text>
+          {allowsFraction(item.unit) ? (
+            /* Typed, not tapped. Reaching 1.75 kg with a ±1 step is seven taps
+               and a rounding argument; for anything sold by weight the number
+               itself has to be the control. */
+            <TextInput
+              value={String(item.qty)}
+              onChangeText={(v) => {
+                const cleaned = sanitiseQty(v, item.unit);
+                const res = cart.setQty(item.productId, cleaned);
+                if (res && res.ok === false && res.reason === 'stock') {
+                  toast.error(t('pos.notEnoughStock'));
+                }
+              }}
+              keyboardType="decimal-pad"
+              selectTextOnFocus
+              maxLength={9}
+              accessibilityLabel={`${t('pos.quantity')} ${item.name}`}
+              className="mx-2 h-9 w-20 rounded-lg border border-slate-300 bg-white text-center text-base font-bold text-slate-900"
+            />
+          ) : (
+            <Text className="mx-3 min-w-[24px] text-center text-base font-bold text-slate-900">{item.qty}</Text>
+          )}
           <Pressable
             onPress={() => {
               const res = cart.increment(item.productId);
@@ -247,7 +327,9 @@ export default function PosScreen() {
           >
             <Ionicons name="add" size={18} color="#334155" />
           </Pressable>
-          <Text className="ml-2 text-xs text-slate-400">/ {item.stock}</Text>
+          <Text className="ml-2 text-xs text-slate-400">
+            {item.unit && item.unit !== DEFAULT_UNIT ? `${item.unit} ` : ''}/ {item.stock}
+          </Text>
         </View>
 
         {/* Gross for this line. The discount is deducted once, in the summary. */}
@@ -331,6 +413,10 @@ export default function PosScreen() {
         onRetry={loadAll}
         retryLabel={t('common.retry')}
       />
+
+      {/* Above the grid, not buried in Sales: money the shop has taken and the
+          records do not know about belongs where the selling happens. */}
+      <QueueBanner className="mt-2" />
 
       {loading && !products.length ? (
         <Loading label={t('common.loading')} />
@@ -469,12 +555,59 @@ export default function PosScreen() {
               contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12 }}
               keyboardShouldPersistTaps="handled"
               ListHeaderComponent={
-                <TextField
-                  label={t('pos.customerName')}
-                  value={cart.customerName}
-                  onChangeText={cart.setCustomerName}
-                  placeholder={t('pos.walkIn')}
-                />
+                /**
+                 * A ledger customer REPLACES the free-text name rather than
+                 * sitting beside it. Two name fields on one receipt is an
+                 * invitation to file a sale under "Ramesh" while the debt goes
+                 * to a different Ramesh, which is the exact failure a customer
+                 * record exists to prevent.
+                 */
+                cart.customer ? (
+                  <View className="mb-3 flex-row items-center rounded-xl border border-blue-300 bg-blue-50 p-3">
+                    <Ionicons name="person" size={18} color="#1D4ED8" />
+                    <View className="ml-2 flex-1">
+                      <Text className="text-sm font-bold text-slate-900" numberOfLines={1}>
+                        {cart.customer.name}
+                      </Text>
+                      {cart.customer.balance > 0 ? (
+                        <Text className="mt-0.5 text-xs font-semibold text-amber-700">
+                          {t('customers.owesAlready', { amount: formatINR(cart.customer.balance) })}
+                        </Text>
+                      ) : null}
+                    </View>
+                    <Pressable
+                      onPress={() => cart.setCustomer(null)}
+                      hitSlop={8}
+                      className="p-1.5"
+                      accessibilityRole="button"
+                      accessibilityLabel={t('pos.clearCustomer')}
+                    >
+                      <Ionicons name="close-circle" size={20} color="#64748B" />
+                    </Pressable>
+                  </View>
+                ) : (
+                  <>
+                    <TextField
+                      label={t('pos.customerName')}
+                      value={cart.customerName}
+                      onChangeText={cart.setCustomerName}
+                      placeholder={t('pos.walkIn')}
+                    />
+                    {ledgerCustomers.length ? (
+                      <Pressable
+                        onPress={() => setCustomerPicker(true)}
+                        accessibilityRole="button"
+                        accessibilityLabel={t('pos.chooseCustomer')}
+                        className="mb-3 flex-row items-center justify-center rounded-xl border border-slate-300 bg-white py-2.5 active:bg-slate-100"
+                      >
+                        <Ionicons name="people-outline" size={16} color="#334155" />
+                        <Text className="ml-1.5 text-xs font-bold text-slate-700">
+                          {t('pos.chooseCustomer')}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </>
+                )
               }
               ListFooterComponent={
                 <>
@@ -487,6 +620,78 @@ export default function PosScreen() {
                     placeholder="0"
                     hint={t('common.optional')}
                   />
+
+                  {/* Part payment, only when there is somebody to owe it.
+                      Hidden entirely for a walk-in, because a field that can
+                      only produce a 400 is worse than no field. */}
+                  {cart.customer ? (
+                    <View className="mb-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
+                      <Text className="mb-1.5 text-xs font-semibold text-slate-700">
+                        {t('pos.paidNow')}
+                      </Text>
+                      <TextField
+                        value={cart.amountPaid == null ? '' : String(cart.amountPaid)}
+                        onChangeText={cart.setAmountPaid}
+                        mode="money"
+                        prefix="₹"
+                        // The full total as the placeholder: leaving it empty
+                        // charges nothing to the ledger, which is the common
+                        // case even for a customer who has an account.
+                        placeholder={String(grandTotal)}
+                        className="mb-0"
+                        accessibilityLabel={t('pos.paidNow')}
+                      />
+                      {cart.amountPaid != null && cart.amountPaid < grandTotal ? (
+                        <Text className="mt-2 text-xs font-bold text-amber-700">
+                          {t('pos.goesOnCredit', {
+                            amount: formatINR(round2(grandTotal - cart.amountPaid)),
+                            name: cart.customer.name,
+                          })}
+                        </Text>
+                      ) : (
+                        <Text className="mt-2 text-xs text-slate-500">{t('pos.paidInFullHint')}</Text>
+                      )}
+                    </View>
+                  ) : null}
+
+                  {/* How the money is coming in. Above the total rather than
+                      below it, because it is a decision taken WITH the customer
+                      standing there, and anything under the total reads as a
+                      footnote to a sale already made. */}
+                  <View className="mb-3">
+                    <Text className="mb-1.5 text-xs font-semibold text-slate-600">{t('pos.paidBy')}</Text>
+                    {/* Radios, not buttons. These are four mutually exclusive
+                        choices, and `accessibilityState={{selected}}` on a
+                        button is dropped entirely by react-native-web -- a
+                        screen reader user could hear the four options and not
+                        which one was chosen. role=radio emits aria-checked. */}
+                    <View className="flex-row gap-2" accessibilityRole="radiogroup">
+                      {PAYMENT_METHODS.map((m) => {
+                        const active = cart.paymentMethod === m;
+                        return (
+                          <Pressable
+                            key={m}
+                            onPress={() => cart.setPaymentMethod(m)}
+                            accessibilityRole="radio"
+                            accessibilityLabel={t(`pos.pay_${m}`)}
+                            /* Both spellings. react-native-web drops
+                               accessibilityState on a Pressable entirely, so
+                               the chosen method was visible only as a colour --
+                               invisible to a screen reader. `aria-checked` is a
+                               first-class React Native prop these days and is
+                               the one that actually reaches the DOM. */
+                            aria-checked={active}
+                            accessibilityState={{ checked: active, selected: active }}
+                            className={`flex-1 items-center rounded-xl border py-2.5 ${active ? 'border-blue-600 bg-blue-50' : 'border-slate-300 bg-white'}`}
+                          >
+                            <Text className={`text-xs font-bold ${active ? 'text-blue-700' : 'text-slate-600'}`}>
+                              {t(`pos.pay_${m}`)}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  </View>
 
                   {/* Reads as an invoice: gross, minus discount, plus charges, total. */}
                   <View className="mb-6 rounded-2xl border border-slate-200 bg-white p-4">
@@ -520,6 +725,36 @@ export default function PosScreen() {
           ) : null}
         </SafeAreaView>
       </Modal>
+
+      {/* Picking who the sale is for. A dialog rather than a screen: it is one
+          decision taken mid-sale, and pushing a screen would put the cart
+          behind a back button with a customer waiting. */}
+      <FormModal
+        visible={customerPicker}
+        title={t('pos.chooseCustomer')}
+        onClose={() => setCustomerPicker(false)}
+        cancelLabel={t('common.close')}
+      >
+        {ledgerCustomers.length === 0 ? (
+          <Text className="py-4 text-center text-sm text-slate-500">{t('customers.none')}</Text>
+        ) : ledgerCustomers.map((c) => (
+          <Pressable
+            key={String(c._id)}
+            onPress={() => { cart.setCustomer(c); setCustomerPicker(false); }}
+            accessibilityRole="button"
+            accessibilityLabel={c.name}
+            className="mb-2 flex-row items-center rounded-xl border border-slate-200 bg-white p-3 active:bg-slate-50"
+          >
+            <View className="flex-1">
+              <Text className="text-sm font-bold text-slate-900" numberOfLines={1}>{c.name}</Text>
+              {c.phone ? <Text className="mt-0.5 text-xs text-slate-500">{c.phone}</Text> : null}
+            </View>
+            {c.balance > 0 ? (
+              <Text className="text-xs font-bold text-amber-700">{formatINR(c.balance)}</Text>
+            ) : null}
+          </Pressable>
+        ))}
+      </FormModal>
     </Screen>
   );
 }

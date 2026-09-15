@@ -1,4 +1,5 @@
-import { Order, Product, Category, Expense } from '../models/index.js';
+import { Order, Product, Category, Expense, Payment } from '../models/index.js';
+import { receivablesTotal } from './customerController.js';
 import { parseDateRange, round2 } from '../utils/validators.js';
 
 // Indian businesses close at ~10pm IST; grouping in UTC would push evening
@@ -75,6 +76,58 @@ export async function summary(req, res) {
    * subtracting expenses from that same label would make yesterday's figure
    * disagree with today's for no visible reason.
    */
+  /**
+   * How the money came in, for the one question revenue cannot answer: how much
+   * cash should be in the drawer tonight.
+   *
+   * Receipts written before payment methods existed have no `paymentMethod`, so
+   * they are counted as cash -- which is what they were. Defaulting them to
+   * "unknown" would put a shop's entire history into a bucket that means
+   * nothing and make the first day's figures look like a bug.
+   */
+  const [takenAtCounter, takenAsRepayment] = await Promise.all([
+    Order.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: { $ifNull: ['$paymentMethod', 'cash'] },
+          /**
+           * What was actually HANDED OVER, not what was billed.
+           *
+           * Summing grandTotal here was wrong the moment credit existed: a
+           * ₹1000 sale with ₹200 paid put the whole ₹1000 in the cash column,
+           * so the one number this block exists for -- how much should be in
+           * the drawer -- overstated by every rupee sold on credit.
+           */
+          amount: { $sum: { $ifNull: ['$amountPaid', '$grandTotal'] } },
+          orders: { $sum: 1 },
+        },
+      },
+    ]),
+    /**
+     * Repayments are takings too, and were missing entirely. Money a customer
+     * hands over against an old debt is in the drawer tonight exactly like a
+     * sale is -- it just does not belong to a sale in this period.
+     */
+    Payment.aggregate([
+      { $match: { businessId: req.businessId, at: { $gte: from, $lte: to } } },
+      { $group: { _id: { $ifNull: ['$method', 'cash'] }, amount: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const byMethod = new Map();
+  for (const row of takenAtCounter) {
+    byMethod.set(row._id, { method: row._id, amount: row.amount, orders: row.orders, repayments: 0 });
+  }
+  for (const row of takenAsRepayment) {
+    const existing = byMethod.get(row._id) ?? { method: row._id, amount: 0, orders: 0, repayments: 0 };
+    existing.amount += row.amount;
+    existing.repayments += row.count;
+    byMethod.set(row._id, existing);
+  }
+  const payments = [...byMethod.values()].sort((a, b) => b.amount - a.amount);
+  const received = round2(payments.reduce((sum, p) => sum + p.amount, 0));
+
   const [exp] = await Expense.aggregate([
     { $match: { businessId: req.businessId, spentAt: { $gte: from, $lte: to } } },
     { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
@@ -82,9 +135,34 @@ export async function summary(req, res) {
   const expenses = round2(exp?.total || 0);
   const grossProfit = round2(revenue - cogs);
 
+  /**
+   * What the shop is owed, right now -- not for the reporting period.
+   *
+   * A debt does not belong to the window it was incurred in; it is outstanding
+   * until it is paid, and a shopkeeper looking at "last month" still wants to
+   * know what is on the street today. Scoping it to the range would make the
+   * figure shrink every time they narrowed the filter, which is the opposite of
+   * what it means.
+   */
+  const receivables = await receivablesTotal(req.businessId);
+
   res.json({
     ok: true,
     range: { from, to },
+    receivables,
+    /**
+     * Shares are of what CAME IN, not of revenue. Against revenue they stopped
+     * adding up to 100 the moment a sale went on credit or a debt was repaid --
+     * two things that are, between them, most of what this breakdown is for.
+     */
+    received,
+    payments: payments.map((p) => ({
+      method: p.method,
+      amount: round2(p.amount),
+      orders: p.orders,
+      repayments: p.repayments,
+      sharePercent: received > 0 ? round2((p.amount / received) * 100) : 0,
+    })),
     sales: {
       orders: agg?.orders || 0,
       revenue,
@@ -286,6 +364,10 @@ export async function exportData(req, res) {
     orderId: String(o._id),
     date: o.timestamp,
     customer: o.customerName,
+    paidBy: o.paymentMethod ?? 'cash',
+    // Absent on a sale that was simply paid for, which is most of them.
+    paidNow: round2(o.amountPaid == null ? o.grandTotal : o.amountPaid),
+    balanceDue: round2(Math.max(0, o.grandTotal - (o.amountPaid == null ? o.grandTotal : o.amountPaid))),
     itemCount: o.items.length,
     unitsSold: o.items.reduce((s, i) => s + i.qty, 0),
     subtotal: round2(o.subtotal),
@@ -303,6 +385,7 @@ export async function exportData(req, res) {
       customer: o.customerName,
       product: i.name,
       qty: i.qty,
+      unit: i.unit ?? 'pcs',
       unitPrice: round2(i.price),
       discount: round2(i.discount),
       lineTotal: round2(i.lineTotal),
