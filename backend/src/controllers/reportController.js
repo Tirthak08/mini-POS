@@ -1,4 +1,4 @@
-import { Order, Product, Category, Expense, Payment } from '../models/index.js';
+import { Order, Product, Category, Expense, Payment, Return } from '../models/index.js';
 import { receivablesTotal } from './customerController.js';
 import { parseDateRange, round2 } from '../utils/validators.js';
 
@@ -85,7 +85,7 @@ export async function summary(req, res) {
    * "unknown" would put a shop's entire history into a bucket that means
    * nothing and make the first day's figures look like a bug.
    */
-  const [takenAtCounter, takenAsRepayment] = await Promise.all([
+  const [takenAtCounter, takenAsRepayment, paidOutAsRefund, [returnAgg]] = await Promise.all([
     Order.aggregate([
       { $match: match },
       {
@@ -113,19 +113,80 @@ export async function summary(req, res) {
       { $match: { businessId: req.businessId, at: { $gte: from, $lte: to } } },
       { $group: { _id: { $ifNull: ['$method', 'cash'] }, amount: { $sum: '$amount' }, count: { $sum: 1 } } },
     ]),
+    /**
+     * Refunds are takings in reverse. A return paid out of the till leaves the
+     * drawer lighter by exactly that much tonight, so it is subtracted from the
+     * method it went out by -- otherwise the one figure this block exists for
+     * overstates again, the same way it did before repayments were counted.
+     *
+     * Refunds credited to a khata are excluded here on purpose: no money moved.
+     * They reduce what the customer owes, and that is the receivables figure's
+     * job, not the drawer's.
+     */
+    Return.aggregate([
+      {
+        $match: {
+          businessId: req.businessId,
+          at: { $gte: from, $lte: to },
+          refundMethod: { $ne: 'credit' },
+        },
+      },
+      {
+        $group: {
+          _id: { $ifNull: ['$refundMethod', 'cash'] },
+          amount: { $sum: '$refundTotal' },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+    /** Every return in the window, however it was refunded -- for the P&L. */
+    Return.aggregate([
+      { $match: { businessId: req.businessId, at: { $gte: from, $lte: to } } },
+      {
+        $group: {
+          _id: null,
+          refunds: { $sum: '$refundTotal' },
+          notes: { $sum: 1 },
+          returnedCost: {
+            $sum: {
+              $sum: {
+                $map: { input: '$lines', as: 'l', in: { $multiply: ['$$l.cost', '$$l.qty'] } },
+              },
+            },
+          },
+          itemsBack: { $sum: { $sum: { $map: { input: '$lines', as: 'l', in: '$$l.qty' } } } },
+        },
+      },
+    ]),
   ]);
 
   const byMethod = new Map();
   for (const row of takenAtCounter) {
-    byMethod.set(row._id, { method: row._id, amount: row.amount, orders: row.orders, repayments: 0 });
+    byMethod.set(row._id, {
+      method: row._id, amount: row.amount, orders: row.orders, repayments: 0, refunds: 0, refunded: 0,
+    });
   }
   for (const row of takenAsRepayment) {
-    const existing = byMethod.get(row._id) ?? { method: row._id, amount: 0, orders: 0, repayments: 0 };
+    const existing = byMethod.get(row._id)
+      ?? { method: row._id, amount: 0, orders: 0, repayments: 0, refunds: 0, refunded: 0 };
     existing.amount += row.amount;
     existing.repayments += row.count;
     byMethod.set(row._id, existing);
   }
-  const payments = [...byMethod.values()].sort((a, b) => b.amount - a.amount);
+  for (const row of paidOutAsRefund) {
+    const existing = byMethod.get(row._id)
+      ?? { method: row._id, amount: 0, orders: 0, repayments: 0, refunds: 0, refunded: 0 };
+    existing.amount -= row.amount;
+    existing.refunded += row.amount;
+    existing.refunds += row.count;
+    byMethod.set(row._id, existing);
+  }
+  /* A method that only ever saw a refund is kept: "cash −₹150" is exactly the
+     line somebody counting the drawer needs to see. */
+  const payments = [...byMethod.values()]
+    .filter((p) => p.amount !== 0 || p.refunds > 0)
+    .map((p) => ({ ...p, amount: round2(p.amount), refunded: round2(p.refunded) }))
+    .sort((a, b) => b.amount - a.amount);
   const received = round2(payments.reduce((sum, p) => sum + p.amount, 0));
 
   const [exp] = await Expense.aggregate([
@@ -133,7 +194,24 @@ export async function summary(req, res) {
     { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
   ]);
   const expenses = round2(exp?.total || 0);
-  const grossProfit = round2(revenue - cogs);
+
+  /**
+   * Returns, netted off.
+   *
+   * Both halves, not just the money: goods that came back are on the shelf
+   * again, so their cost has to come out of COGS as well. Subtracting the
+   * refund alone would make every return look like a pure loss of margin and
+   * quietly understate profit.
+   *
+   * `revenue` itself is left as the gross figure the receipts add up to --
+   * changing what that word has always meant would silently move every number
+   * anybody has ever read off this screen. The net figure sits beside it.
+   */
+  const refunds = round2(returnAgg?.refunds || 0);
+  const returnedCost = round2(returnAgg?.returnedCost || 0);
+  const netRevenue = round2(revenue - refunds);
+  const netCogs = round2(cogs - returnedCost);
+  const grossProfit = round2(netRevenue - netCogs);
 
   /**
    * What the shop is owed, right now -- not for the reporting period.
@@ -161,11 +239,22 @@ export async function summary(req, res) {
       amount: round2(p.amount),
       orders: p.orders,
       repayments: p.repayments,
+      refunds: p.refunds,
+      refunded: p.refunded,
       sharePercent: received > 0 ? round2((p.amount / received) * 100) : 0,
     })),
     sales: {
       orders: agg?.orders || 0,
       revenue,
+      /* Gross revenue is what the receipts add up to; net is what the shop
+         kept after goods came back. Both, because a report that showed only
+         one of them would be answering a question nobody asked. */
+      refunds,
+      refundCount: returnAgg?.notes || 0,
+      itemsReturned: round2(returnAgg?.itemsBack || 0),
+      netRevenue,
+      returnedCost,
+      netCogs,
       grossSales: round2(agg?.grossSales || 0),
       // Kept under the old name for anything still reading it.
       productSales: round2((agg?.grossSales || 0) - (agg?.discounts || 0)),
@@ -184,8 +273,8 @@ export async function summary(req, res) {
        * lie the shop makes decisions on.
        */
       netProfit: round2(grossProfit - expenses),
-      marginPercent: revenue ? round2((grossProfit / revenue) * 100) : 0,
-      netMarginPercent: revenue ? round2(((grossProfit - expenses) / revenue) * 100) : 0,
+      marginPercent: netRevenue ? round2((grossProfit / netRevenue) * 100) : 0,
+      netMarginPercent: netRevenue ? round2(((grossProfit - expenses) / netRevenue) * 100) : 0,
       itemsSold: agg?.itemsSold || 0,
       averageOrderValue: agg?.orders ? round2(revenue / agg.orders) : 0,
     },
@@ -415,8 +504,43 @@ export async function exportData(req, res) {
     amount: round2(e.amount),
   }));
 
+  /**
+   * Credit notes, as their own list for the same reason expenses are: they are
+   * not sales, and folding them into the order rows would invent transactions.
+   * Without them an exported profit column counts goods that came back as sold.
+   */
+  const returns = await Return.find({
+    businessId: req.businessId,
+    at: { $gte: from, $lte: to },
+  })
+    .sort({ at: 1 })
+    .lean();
+
+  const returnRows = returns.flatMap((r) =>
+    r.lines.map((l) => ({
+      creditNoteNo: `CN-${String(r.returnNumber ?? 0).padStart(6, '0')}`,
+      returnId: String(r._id),
+      receiptNo: `INV-${String(r.orderNumber ?? 0).padStart(6, '0')}`,
+      date: r.at,
+      customer: r.customerName || 'Walk-in',
+      refundedBy: r.refundMethod,
+      product: l.name,
+      qty: l.qty,
+      unit: l.unit ?? 'pcs',
+      unitRefund: round2(l.price),
+      refund: round2(l.refund),
+      unitCost: round2(l.cost),
+      costBack: round2(l.cost * l.qty),
+      reason: r.reason || '',
+    }))
+  );
+
   const revenue = round2(orderRows.reduce((s, r) => s + r.grandTotal, 0));
-  const grossProfit = round2(orderRows.reduce((s, r) => s + (r.grandTotal - r.cogs), 0));
+  const refundTotal = round2(returnRows.reduce((s, r) => s + r.refund, 0));
+  const costBack = round2(returnRows.reduce((s, r) => s + r.costBack, 0));
+  const grossProfit = round2(
+    orderRows.reduce((s, r) => s + (r.grandTotal - r.cogs), 0) - (refundTotal - costBack)
+  );
   const expenseTotal = round2(expenseRows.reduce((s, r) => s + r.amount, 0));
 
   res.json({
@@ -427,6 +551,9 @@ export async function exportData(req, res) {
     totals: {
       orders: orderRows.length,
       revenue,
+      refunds: refundTotal,
+      refundCount: returns.length,
+      netRevenue: round2(revenue - refundTotal),
       // `profit` stays GROSS so an older client reading it means what it always
       // meant; the honest bottom line is netProfit beside it.
       profit: grossProfit,
@@ -437,6 +564,7 @@ export async function exportData(req, res) {
     },
     orders: orderRows,
     items: itemRows,
+    returns: returnRows,
     expenses: expenseRows,
   });
 }

@@ -13,7 +13,7 @@ import EmptyState from '../components/EmptyState';
 import Loading, { ErrorBanner } from '../components/Loading';
 import { Card, StatTile, Badge } from '../components/Card';
 import QuantityStepper from '../components/QuantityStepper';
-import { orderApi } from '../api/endpoints';
+import { orderApi, returnApi } from '../api/endpoints';
 import { useAuthStore } from '../store/authStore';
 import { useInventoryStore } from '../store/inventoryStore';
 import { toast } from '../store/uiStore';
@@ -21,6 +21,8 @@ import { confirm } from '../store/confirmStore';
 import DateRangePicker from '../components/DateRangePicker';
 import ExpensesPanel from '../components/ExpensesPanel';
 import { formatINR, formatDate, round2 } from '../utils/money';
+import { PAYMENT_METHODS } from '../utils/payments';
+import { allowsFraction } from '../utils/units';
 import { shareReceipt } from '../utils/receipt';
 import { resolveRange, DEFAULT_PRESET } from '../utils/dateRange';
 import { colors } from '../theme';
@@ -52,17 +54,49 @@ export default function SalesScreen() {
   const [pagination, setPagination] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState(null);
+
+  /**
+   * What was typed, and what has actually been sent.
+   *
+   * Separated so every keystroke does not become a request. `query` follows the
+   * field; `term` catches up 350ms later and is what `load` depends on, which is
+   * also what stops a half-typed "ram" from racing the finished "ramesh" and
+   * landing after it.
+   */
+  const [query, setQuery] = useState('');
+  const [term, setTerm] = useState('');
+  useEffect(() => {
+    const id = setTimeout(() => setTerm(query.trim()), 350);
+    return () => clearTimeout(id);
+  }, [query]);
+  const searching = term.length > 0;
 
   const [selected, setSelected] = useState(null); // receipt being viewed
   const [editing, setEditing] = useState(null);   // draft being edited
   const [saving, setSaving] = useState(false);
 
+  const PAGE = 50;
+
   const load = useCallback(async ({ silent = false } = {}) => {
     silent ? setRefreshing(true) : setLoading(true);
     setError(null);
     try {
-      const res = await orderApi.list({ ...range.apiRange, limit: 100 });
+      /**
+       * The window is sent either way, and the SERVER ignores it when there is
+       * a search -- somebody hunting for a receipt is hunting precisely because
+       * it is not in front of them.
+       *
+       * Dropping it here instead would look equivalent and is not: the server
+       * defaults to the last thirty days when no range arrives, so a client
+       * that omitted it would silently narrow every search to a month the
+       * moment the server stopped ignoring the window. Sending it means the
+       * rule lives in exactly one place, and a test can see it working.
+       */
+      const res = await orderApi.list({
+        ...range.apiRange, limit: PAGE, page: 1, ...(searching && { q: term }),
+      });
       setOrders(res.orders ?? []);
       setPagination(res.pagination ?? null);
     } catch (err) {
@@ -71,7 +105,38 @@ export default function SalesScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [range]);
+  }, [range, term, searching]);
+
+  /**
+   * The next page, appended.
+   *
+   * The list used to ask for 100 rows and stop there, with nothing on screen to
+   * say that it had. A shop past its hundredth sale simply could not reach the
+   * older ones.
+   */
+  const loadMore = useCallback(async () => {
+    if (loadingMore || loading) return;
+    const next = (pagination?.page ?? 1) + 1;
+    if (next > (pagination?.pages ?? 1)) return;
+    setLoadingMore(true);
+    try {
+      const res = await orderApi.list({
+        ...range.apiRange, limit: PAGE, page: next, ...(searching && { q: term }),
+      });
+      /* Concatenated by id rather than blindly: a sale made while you were
+         reading shifts every row down one, and the same receipt would
+         otherwise arrive twice with the same key. */
+      setOrders((prev) => {
+        const seen = new Set(prev.map((o) => String(o._id)));
+        return [...prev, ...(res.orders ?? []).filter((o) => !seen.has(String(o._id)))];
+      });
+      setPagination(res.pagination ?? null);
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, loading, pagination, range, term, searching]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -83,6 +148,10 @@ export default function SalesScreen() {
     revenue: round2(orders.reduce((sum, o) => sum + (o.grandTotal || 0), 0)),
     units: orders.reduce((sum, o) => sum + o.items.reduce((n, i) => n + i.qty, 0), 0),
   }), [orders]);
+
+  /** How many there are altogether, as against how many have been fetched. */
+  const matchCount = pagination?.total ?? orders.length;
+  const partial = orders.length < matchCount;
 
   /* ----------------------------- the receipt ----------------------------- */
 
@@ -96,6 +165,111 @@ export default function SalesScreen() {
       toast.error(t('receipt.failed'));
     } finally {
       setSharing(false);
+    }
+  };
+
+  /* ------------------------------- returns ------------------------------- */
+
+  /**
+   * The receipt list does NOT carry how much of each line has already come
+   * back -- that is a second collection, and putting it on every row of every
+   * listing would be a join per sale for a figure almost no row needs. So the
+   * full receipt is fetched when one is opened, and the row's own copy stands
+   * in until it lands.
+   */
+  const openReceipt = useCallback(async (order) => {
+    setSelected(order);
+    try {
+      const res = await orderApi.get(order._id);
+      // Ignore a reply that arrives after the operator has closed it or moved on.
+      setSelected((cur) => (cur && cur._id === order._id ? { ...cur, ...res.order } : cur));
+    } catch { /* the row's own copy is enough to read the receipt */ }
+  }, []);
+
+  const [returning, setReturning] = useState(null); // { order, lines, method, reason }
+  const [returnSaving, setReturnSaving] = useState(false);
+
+  const startReturn = (order) => {
+    const lines = (order.items ?? [])
+      .map((l) => ({
+        productId: l.productId,
+        name: l.name,
+        unit: l.unit,
+        /* What was actually charged per unit, which is the line's total over
+           its quantity -- a discounted line refunds at the discounted rate. */
+        each: round2((l.lineTotal ?? round2(l.price * l.qty - (l.discount || 0))) / l.qty),
+        max: l.returnable ?? l.qty,
+        returned: l.returned ?? 0,
+        include: false,
+        qty: '',
+      }))
+      .filter((l) => l.max > 0);
+
+    if (!lines.length) {
+      toast.error(t('returns.nothingLeft'));
+      return;
+    }
+    setReturning({
+      order,
+      lines,
+      /* Somebody with a running khata does not get handed cash and then asked
+         for it back the same afternoon, so their account is the default. */
+      method: order.customerId ? 'credit' : 'cash',
+      reason: '',
+    });
+  };
+
+  const patchReturnLine = (productId, changes) => setReturning((d) => ({
+    ...d,
+    lines: d.lines.map((l) => (l.productId === productId ? { ...l, ...changes } : l)),
+  }));
+
+  const toggleReturnLine = (line) => patchReturnLine(line.productId, line.include
+    ? { include: false, qty: '' }
+    // Pre-filled with everything that is left, because "all of it" is the
+    // common case and retyping a number is a chance to get it wrong.
+    : { include: true, qty: String(line.max) });
+
+  const returnTotals = useMemo(() => {
+    if (!returning) return { refund: 0, count: 0, invalid: null };
+    let refund = 0, count = 0, invalid = null;
+    for (const l of returning.lines) {
+      if (!l.include) continue;
+      const qty = Number(l.qty);
+      if (!l.qty || !Number.isFinite(qty) || qty <= 0) { invalid = invalid ?? l; continue; }
+      if (qty > l.max) { invalid = invalid ?? l; continue; }
+      if (!allowsFraction(l.unit) && !Number.isInteger(qty)) { invalid = invalid ?? l; continue; }
+      refund = round2(refund + qty * l.each);
+      count += 1;
+    }
+    return { refund, count, invalid };
+  }, [returning]);
+
+  const submitReturn = async () => {
+    const items = returning.lines
+      .filter((l) => l.include && Number(l.qty) > 0)
+      .map((l) => ({ productId: l.productId, qty: Number(l.qty) }));
+    if (!items.length) return;
+
+    setReturnSaving(true);
+    try {
+      const res = await returnApi.create(returning.order._id, {
+        items,
+        refundMethod: returning.method,
+        reason: returning.reason.trim(),
+      });
+      setReturning(null);
+      setSelected(null);
+      toast.success(t('returns.done', {
+        note: res.return?.creditNoteNo ?? '',
+        amount: formatINR(res.return?.refundTotal ?? 0),
+      }));
+      await load({ silent: true });
+      reloadInventory({ silent: true }); // the goods are back on the shelf
+    } catch (err) {
+      toast.error(err.message ?? t('errors.generic'));
+    } finally {
+      setReturnSaving(false);
     }
   };
 
@@ -212,7 +386,7 @@ export default function SalesScreen() {
     const units = item.items.reduce((n, i) => n + i.qty, 0);
     return (
       <Pressable
-        onPress={() => setSelected(item)}
+        onPress={() => openReceipt(item)}
         accessibilityRole="button"
         accessibilityLabel={`${receiptLabel(item)}, ${formatINR(item.grandTotal)}`}
         className="mx-4 mb-2 rounded-2xl border border-slate-200 bg-white p-3 active:bg-slate-50"
@@ -242,7 +416,7 @@ export default function SalesScreen() {
         </View>
       </Pressable>
     );
-  }, [t]);
+  }, [t, openReceipt]);
 
   const Row = ({ label, value, bold, tone }) => (
     <View className="flex-row items-center justify-between py-1">
@@ -303,6 +477,39 @@ export default function SalesScreen() {
         })}
       </View>
 
+      {/* The search box sits ABOVE the period filter, and only on the sales
+          half: it overrides the filter rather than narrowing it, so it has to
+          read as the outer control. */}
+      {segment === 'sales' ? (
+        <View className="px-4 pt-3">
+          <TextField
+            value={query}
+            onChangeText={setQuery}
+            placeholder={t('sales.searchPlaceholder')}
+            accessibilityLabel={t('sales.searchLabel')}
+            className="mb-0"
+          />
+        </View>
+      ) : null}
+
+      {searching ? (
+        /* Said plainly, because the period filter is still on screen and is no
+           longer deciding anything. Silently ignoring a control the operator
+           can see is how a screen earns a reputation for lying. */
+        <View className="mx-4 mt-2 flex-row items-center rounded-xl border border-blue-200 bg-blue-50 px-3 py-2">
+          <Ionicons name="search" size={14} color={colors.brand} />
+          <Text className="ml-2 flex-1 text-xs text-slate-600">{t('sales.searchingAllTime')}</Text>
+          <Pressable
+            onPress={() => { setQuery(''); setTerm(''); }}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={t('sales.clearSearch')}
+          >
+            <Text className="text-xs font-bold text-blue-700">{t('sales.clearSearch')}</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
       <DateRangePicker value={range} onChange={setRange} />
 
       {segment === 'expenses' ? (
@@ -324,15 +531,59 @@ export default function SalesScreen() {
           contentContainerStyle={{ paddingBottom: 40 }}
           ListHeaderComponent={
             orders.length ? (
-              <View className="mb-3 flex-row gap-2 px-4">
-                <StatTile className="flex-1" label={t('sales.orderCount')} value={String(totals.count)} tone="brand" />
-                <StatTile className="flex-1" label={t('sales.totalSales')} value={formatINR(totals.revenue)} />
-                <StatTile className="flex-1" label={t('reports.itemsSold')} value={String(totals.units)} />
+              <View className="mb-3 px-4">
+                <View className="flex-row gap-2">
+                  {/* The count is the SERVER's, not the number of rows fetched:
+                      the list pages, and a tile that counted what had been
+                      scrolled to would fall behind the truth. */}
+                  <StatTile
+                    className="flex-1"
+                    label={searching ? t('sales.matches') : t('sales.orderCount')}
+                    value={String(matchCount)}
+                    tone="brand"
+                  />
+                  {/* Money and units CANNOT be totalled beyond what has been
+                      loaded, so when there is more to come the tiles say which
+                      rows they are about instead of quietly under-reporting. */}
+                  <StatTile
+                    className="flex-1"
+                    label={t('sales.totalSales')}
+                    value={formatINR(totals.revenue)}
+                    sub={partial ? t('sales.ofLoaded', { n: orders.length }) : undefined}
+                  />
+                  <StatTile
+                    className="flex-1"
+                    label={t('reports.itemsSold')}
+                    value={String(totals.units)}
+                    sub={partial ? t('sales.ofLoaded', { n: orders.length }) : undefined}
+                  />
+                </View>
+              </View>
+            ) : null
+          }
+          ListFooterComponent={
+            partial ? (
+              <View className="px-4 pb-6 pt-1">
+                <Button
+                  title={t('sales.loadMore', { n: matchCount - orders.length })}
+                  onPress={loadMore}
+                  loading={loadingMore}
+                  variant="secondary"
+                  fullWidth
+                />
               </View>
             ) : null
           }
           ListEmptyComponent={
-            <EmptyState icon="receipt-outline" title={t('sales.noSales')} hint={t('sales.noSalesHint')} />
+            searching ? (
+              <EmptyState
+                icon="search-outline"
+                title={t('sales.noMatches', { q: term })}
+                hint={t('sales.noMatchesHint')}
+              />
+            ) : (
+              <EmptyState icon="receipt-outline" title={t('sales.noSales')} hint={t('sales.noSalesHint')} />
+            )
           }
         />
       )}
@@ -340,7 +591,7 @@ export default function SalesScreen() {
       )}
 
       {/* ------------------------- receipt detail ------------------------- */}
-      <Modal visible={Boolean(selected) && !editing} animationType="slide" onRequestClose={() => setSelected(null)}>
+      <Modal visible={Boolean(selected) && !editing && !returning} animationType="slide" onRequestClose={() => setSelected(null)}>
         <SafeAreaView className="flex-1 bg-slate-50" edges={['top', 'left', 'right']}>
           {selected ? (
             <>
@@ -387,6 +638,14 @@ export default function SalesScreen() {
                           {t('pos.listPrice')} {formatINR(line.listPrice)}
                         </Text>
                       ) : null}
+                      {/* Said on the line itself, not only in a total: a
+                          receipt where half of one item came back looks
+                          completely untouched otherwise. */}
+                      {line.returned > 0 ? (
+                        <Text className="mt-0.5 text-xs font-semibold text-purple-700">
+                          {t('returns.lineReturned', { qty: line.returned, of: line.qty })}
+                        </Text>
+                      ) : null}
                     </View>
                   ))}
 
@@ -399,6 +658,22 @@ export default function SalesScreen() {
                       <Row label={t('pos.extraCharges')} value={`+ ${formatINR(selected.extraCharges)}`} />
                     ) : null}
                     <Row label={t('pos.grandTotal')} value={formatINR(selected.grandTotal)} bold />
+                    {selected.returnedTotal > 0 ? (
+                      <>
+                        <Row
+                          label={t('returns.refunded')}
+                          value={`− ${formatINR(selected.returnedTotal)}`}
+                          tone="discount"
+                        />
+                        {/* What the sale was actually worth once the goods that
+                            came back are taken off it. */}
+                        <Row
+                          label={t('returns.netOfReturns')}
+                          value={formatINR(round2(selected.grandTotal - selected.returnedTotal))}
+                          bold
+                        />
+                      </>
+                    ) : null}
                   </View>
                 </Card>
 
@@ -413,6 +688,18 @@ export default function SalesScreen() {
                   icon="share-social-outline"
                   onPress={() => shareSaleReceipt(selected)}
                   loading={sharing}
+                  fullWidth
+                />
+                {/* Returning sits with the corrective actions but above them:
+                    it is the one that happens days later and to a sale that was
+                    perfectly correct, which is a different thing from fixing a
+                    mistake or cancelling one. */}
+                <Button
+                  className="mt-2"
+                  title={t('returns.action')}
+                  icon="arrow-undo-outline"
+                  variant="secondary"
+                  onPress={() => startReturn(selected)}
                   fullWidth
                 />
                 <View className="mt-2 flex-row gap-3">
@@ -435,6 +722,164 @@ export default function SalesScreen() {
                     />
                   </View>
                 </View>
+              </View>
+            </>
+          ) : null}
+        </SafeAreaView>
+      </Modal>
+
+      {/* --------------------------- return items --------------------------- */}
+      <Modal visible={Boolean(returning)} animationType="slide" onRequestClose={() => setReturning(null)}>
+        <SafeAreaView className="flex-1 bg-slate-50" edges={['top', 'left', 'right']}>
+          {returning ? (
+            <>
+              <View className="flex-row items-center justify-between border-b border-slate-200 bg-white px-4 py-3">
+                <View className="flex-1">
+                  <Text className="text-lg font-bold text-slate-900">{t('returns.title')}</Text>
+                  <Text className="text-xs text-slate-500">{receiptLabel(returning.order)}</Text>
+                </View>
+                <Pressable
+                  onPress={() => setReturning(null)}
+                  hitSlop={10}
+                  accessibilityRole="button"
+                  accessibilityLabel={t('common.close')}
+                >
+                  <Ionicons name="close" size={24} color="#64748B" />
+                </Pressable>
+              </View>
+
+              <ScrollView className="flex-1 px-4 pt-3" keyboardShouldPersistTaps="handled">
+                <Text className="mb-2 px-1 text-xs text-slate-500">{t('returns.pickHint')}</Text>
+
+                {returning.lines.map((line) => {
+                  const qty = Number(line.qty);
+                  const over = line.include && line.qty !== '' && qty > line.max;
+                  const fraction = line.include && line.qty !== ''
+                    && !allowsFraction(line.unit) && Number.isFinite(qty) && !Number.isInteger(qty);
+                  return (
+                    <Card key={String(line.productId)} className="mb-2">
+                      <Pressable
+                        onPress={() => toggleReturnLine(line)}
+                        accessibilityRole="checkbox"
+                        /* aria-checked, not accessibilityState alone:
+                           react-native-web drops the latter on a Pressable, so
+                           whether a line was selected existed only as a tick. */
+                        aria-checked={line.include}
+                        accessibilityState={{ checked: line.include }}
+                        accessibilityLabel={line.name}
+                        className="flex-row items-center"
+                      >
+                        <Ionicons
+                          name={line.include ? 'checkbox' : 'square-outline'}
+                          size={22}
+                          color={line.include ? colors.brand : '#94A3B8'}
+                        />
+                        <View className="ml-2.5 flex-1">
+                          <Text className="text-sm font-bold text-slate-900" numberOfLines={1}>{line.name}</Text>
+                          <Text className="mt-0.5 text-xs text-slate-500">
+                            {t('returns.canReturn', { qty: line.max, unit: line.unit })}
+                            {' · '}
+                            {t('returns.each', { amount: formatINR(line.each) })}
+                          </Text>
+                          {line.returned > 0 ? (
+                            <Text className="mt-0.5 text-xs text-purple-700">
+                              {t('returns.alreadyBack', { qty: line.returned })}
+                            </Text>
+                          ) : null}
+                        </View>
+                      </Pressable>
+
+                      {line.include ? (
+                        <View className="mt-2 flex-row items-end gap-3">
+                          <View className="flex-1">
+                            <TextField
+                              label={t('returns.howMany')}
+                              value={line.qty}
+                              onChangeText={(v) => patchReturnLine(line.productId, { qty: v })}
+                              mode="money"
+                              accessibilityLabel={`${t('returns.howMany')} ${line.name}`}
+                              error={over ? t('returns.tooMany', { qty: line.max })
+                                : fraction ? t('returns.wholeOnly', { unit: line.unit })
+                                  : undefined}
+                            />
+                          </View>
+                          <View className="pb-3">
+                            <Text className="text-xs text-slate-500">{t('returns.refundLine')}</Text>
+                            <Text className="text-base font-bold text-slate-900">
+                              {formatINR(over || fraction || !(qty > 0) ? 0 : round2(qty * line.each))}
+                            </Text>
+                          </View>
+                        </View>
+                      ) : null}
+                    </Card>
+                  );
+                })}
+
+                <Text className="mb-1.5 mt-2 px-1 text-sm font-medium text-slate-700">
+                  {t('returns.howRefunded')}
+                </Text>
+                <View className="mb-1 flex-row flex-wrap gap-2" accessibilityRole="radiogroup">
+                  {[
+                    ...PAYMENT_METHODS,
+                    // Only offered when there IS an account to credit. Without a
+                    // customer on the sale the server refuses it, and offering a
+                    // choice that cannot work is worse than not offering it.
+                    ...(returning.order.customerId ? ['credit'] : []),
+                  ].map((m) => {
+                    const active = returning.method === m;
+                    const label = m === 'credit' ? t('returns.offTheirDebt') : t(`pos.pay_${m}`);
+                    return (
+                      <Pressable
+                        key={m}
+                        onPress={() => setReturning((d) => ({ ...d, method: m }))}
+                        accessibilityRole="radio"
+                        accessibilityLabel={label}
+                        aria-checked={active}
+                        accessibilityState={{ checked: active }}
+                        className={`min-w-[30%] flex-1 items-center rounded-xl border py-2.5 ${
+                          active ? 'border-blue-600 bg-blue-50' : 'border-slate-300 bg-white'
+                        }`}
+                      >
+                        <Text className={`text-xs font-bold ${active ? 'text-blue-700' : 'text-slate-600'}`}>
+                          {label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                {returning.method === 'credit' ? (
+                  <Text className="mb-2 px-1 text-xs text-slate-500">
+                    {t('returns.creditHint', { name: returning.order.customerName })}
+                  </Text>
+                ) : null}
+
+                <TextField
+                  label={t('returns.reason')}
+                  value={returning.reason}
+                  onChangeText={(v) => setReturning((d) => ({ ...d, reason: v }))}
+                  placeholder={t('returns.reasonPlaceholder')}
+                  hint={t('common.optional')}
+                />
+                <View className="h-6" />
+              </ScrollView>
+
+              <View className="border-t border-slate-200 bg-white px-4 pb-6 pt-3">
+                <View className="mb-2 flex-row items-center justify-between">
+                  <Text className="text-sm text-slate-600">{t('returns.refundTotal')}</Text>
+                  <Text className="text-2xl font-bold text-slate-900">{formatINR(returnTotals.refund)}</Text>
+                </View>
+                <Button
+                  title={t('returns.confirm')}
+                  icon="arrow-undo-outline"
+                  onPress={submitReturn}
+                  loading={returnSaving}
+                  /* Nothing chosen, or something typed that cannot be returned:
+                     either way there is no return to make, and a button that
+                     submits an impossible one just produces a server error the
+                     operator has to read. */
+                  disabled={returnTotals.count === 0 || Boolean(returnTotals.invalid)}
+                  fullWidth
+                />
               </View>
             </>
           ) : null}

@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import {
   Business, Category, Product, Order, Counter, ProductImage, StockMovement, Expense,
-  Customer, Payment,
+  Customer, Payment, Return,
 } from '../models/index.js';
 import { ApiError } from '../utils/ApiError.js';
 
@@ -118,10 +118,12 @@ export async function exportBackup(req, res) {
   const scope = { businessId };
   const all = (Model) => Model.find(scope).withDeleted().lean();
 
-  const [categories, products, orders, expenses, movements, customers, payments, counter] = await Promise.all([
+  const [categories, products, orders, expenses, movements, customers, payments, returns,
+    counter, returnCounter] = await Promise.all([
     all(Category), all(Product), all(Order), all(Expense), all(StockMovement),
-    all(Customer), all(Payment),
+    all(Customer), all(Payment), all(Return),
     Counter.findById(`${businessId}:order`).lean(),
+    Counter.findById(`${businessId}:return`).lean(),
   ]);
 
   const images = withImages ? await ProductImage.find(scope).withDeleted().lean() : [];
@@ -134,7 +136,7 @@ export async function exportBackup(req, res) {
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
     business: { name: business.name, createdAt: business.createdAt },
-    counters: { order: counter?.seq ?? 0 },
+    counters: { order: counter?.seq ?? 0, return: returnCounter?.seq ?? 0 },
     includesImages: withImages,
     counts: {
       categories: categories.length,
@@ -144,10 +146,11 @@ export async function exportBackup(req, res) {
       movements: movements.length,
       customers: customers.length,
       payments: payments.length,
+      returns: returns.length,
       images: images.length,
     },
     data: {
-      categories, products, orders, expenses, movements, customers, payments,
+      categories, products, orders, expenses, movements, customers, payments, returns,
       images: packImages(images),
     },
   };
@@ -320,6 +323,14 @@ export async function restoreBackup(req, res) {
     await insert(Payment, data.payments, 'payments', (p) => {
       p.customerId = remap(ids, p.customerId);
     });
+    /* After orders and products, both of which a credit note points at. A
+       return whose orderId still named the source shop's receipt would be a
+       refund hanging off somebody else's sale. */
+    await insert(Return, data.returns, 'returns', (r) => {
+      r.orderId = remap(ids, r.orderId);
+      r.customerId = remap(ids, r.customerId);
+      for (const line of r.lines ?? []) line.productId = remap(ids, line.productId);
+    });
     await insert(Expense, data.expenses, 'expenses');
     await insert(StockMovement, data.movements, 'movements', (m) => {
       m.productId = remap(ids, m.productId);
@@ -362,6 +373,13 @@ export async function restoreBackup(req, res) {
   const seq = Math.max(Number(revived.counters?.order) || 0, highest);
   await Counter.updateOne({ _id: `${businessId}:order` }, { $set: { seq } }, { upsert: true });
 
+  // Credit notes have their own sequence, and the same trap: a duplicate
+  // CN number would refuse the next return outright.
+  const highestReturn = (data.returns ?? [])
+    .reduce((max, r) => Math.max(max, Number(r.returnNumber) || 0), 0);
+  const returnSeq = Math.max(Number(revived.counters?.return) || 0, highestReturn);
+  await Counter.updateOne({ _id: `${businessId}:return` }, { $set: { seq: returnSeq } }, { upsert: true });
+
   res.json({
     ok: true,
     mode,
@@ -377,7 +395,7 @@ export async function backupStatus(req, res) {
   const businessId = req.businessId;
   const scope = { businessId };
 
-  const [categories, products, orders, expenses, movements, images, customers, payments] = await Promise.all([
+  const [categories, products, orders, expenses, movements, images, customers, payments, returns] = await Promise.all([
     Category.countDocuments(scope).withDeleted(),
     Product.countDocuments(scope).withDeleted(),
     Order.countDocuments(scope).withDeleted(),
@@ -386,6 +404,7 @@ export async function backupStatus(req, res) {
     ProductImage.countDocuments(scope).withDeleted(),
     Customer.countDocuments(scope).withDeleted(),
     Payment.countDocuments(scope).withDeleted(),
+    Return.countDocuments(scope).withDeleted(),
   ]);
 
   // Rough, and honest about it: enough to warn that including photos turns a
@@ -397,7 +416,7 @@ export async function backupStatus(req, res) {
 
   res.json({
     ok: true,
-    counts: { categories, products, orders, expenses, movements, images, customers, payments },
+    counts: { categories, products, orders, expenses, movements, images, customers, payments, returns },
     approxImageBytes: imageBytes[0]?.bytes ?? 0,
     version: BACKUP_VERSION,
   });

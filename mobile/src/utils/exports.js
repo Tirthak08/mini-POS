@@ -136,7 +136,7 @@ export async function exportCsv(exportPayload, { mode = 'share' } = {}) {
 /* ------------------------------ Excel ------------------------------ */
 
 export async function exportExcel(exportPayload, { mode = 'share' } = {}) {
-  const { orders = [], items = [], expenses = [], totals, business, range } = exportPayload;
+  const { orders = [], items = [], expenses = [], returns = [], totals, business, range } = exportPayload;
   if (!orders.length) throw new Error('Nothing to export in this period');
 
   const workbook = XLSX.utils.book_new();
@@ -223,7 +223,39 @@ export async function exportExcel(exportPayload, { mode = 'share' } = {}) {
     XLSX.utils.book_append_sheet(workbook, expenseSheet, 'Expenses');
   }
 
-  /* Sheet 4: headline numbers. "Profit" is spelled out as gross and net,
+  /* Sheet: credit notes. Not sales, and not negative sales either -- a return
+     happens on its own day and has to be countable separately, or a month with
+     one busy return week looks like a month of poor selling. Omitted when
+     nothing came back. */
+  if (returns.length) {
+    const returnSheet = XLSX.utils.json_to_sheet(
+      returns.map((r) => ({
+        'Credit note': r.creditNoteNo,
+        Date: formatDate(r.date),
+        Receipt: r.receiptNo,
+        Customer: r.customer,
+        Product: r.product,
+        Qty: r.qty,
+        Unit: r.unit,
+        'Refund each': r.unitRefund,
+        Refund: r.refund,
+        'Cost back': r.costBack,
+        'Refunded by': r.refundedBy,
+        Why: r.reason,
+      }))
+    );
+    returnSheet['!cols'] = [
+      { wch: 14 }, { wch: 20 }, { wch: 14 }, { wch: 18 }, { wch: 24 },
+      { wch: 8 }, { wch: 8 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 24 },
+    ];
+    const refundTotal = Math.round(returns.reduce((sum, r) => sum + (r.refund || 0), 0) * 100) / 100;
+    appendTotals(returnSheet, [
+      'TOTAL', `${returns.length} lines`, '', '', '', '', '', '', refundTotal,
+    ]);
+    XLSX.utils.book_append_sheet(workbook, returnSheet, 'Returns');
+  }
+
+  /* Sheet: headline numbers. "Profit" is spelled out as gross and net,
      because this sheet is what gets forwarded to an accountant and a single
      ambiguous "Profit" row is exactly where rent and wages go missing. */
   const expenseTotal = totals?.expenses
@@ -237,6 +269,12 @@ export async function exportExcel(exportPayload, { mode = 'share' } = {}) {
     [],
     ['Orders', totals?.orders ?? orders.length],
     ['Revenue', totals?.revenue ?? 0],
+    /* Only when something came back. A "Returned: 0" row on every report
+       would be noise on the sheet that gets forwarded to an accountant. */
+    ...(totals?.refunds ? [
+      ['Returned', totals.refunds],
+      ['Net revenue', totals.netRevenue ?? Math.round((totals.revenue - totals.refunds) * 100) / 100],
+    ] : []),
     ['Gross profit', gross],
     ['Expenses', expenseTotal],
     ['Net profit', totals?.netProfit ?? Math.round((gross - expenseTotal) * 100) / 100],

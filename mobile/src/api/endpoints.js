@@ -48,6 +48,20 @@ export const orderApi = {
 };
 
 /**
+ * Goods that came back after the sale went through.
+ *
+ * Creating one hangs off the receipt, because the receipt is the only thing
+ * that can say how much there is to return. Undoing one does not, because by
+ * then the credit note is the record.
+ */
+export const returnApi = {
+  create: (orderId, payload) => api.post(`/orders/${orderId}/returns`, payload),
+  forOrder: (orderId) => api.get(`/orders/${orderId}/returns`),
+  list: (params = {}) => api.get('/returns', { params }),
+  undo: (id) => api.delete(`/returns/${id}`),
+};
+
+/**
  * Money out that is not the cost of goods sold. Uncategorised on purpose --
  * amount, note and date are the whole record (see backend Expense model).
  */

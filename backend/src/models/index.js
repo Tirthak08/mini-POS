@@ -10,3 +10,4 @@ export { UNITS, DEFAULT_UNIT, allowsFraction, round3 } from './units.js';
 export { PAYMENT_METHODS } from './Order.js';
 export { default as Customer } from './Customer.js';
 export { default as Payment } from './Payment.js';
+export { default as Return, REFUND_METHODS } from './Return.js';

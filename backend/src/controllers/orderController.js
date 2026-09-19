@@ -4,6 +4,7 @@ import { ApiError } from '../utils/ApiError.js';
 import { assertObjectId, toAmount, toCount, toQty, round2, parseDateRange } from '../utils/validators.js';
 import { allowsFraction, round3, DEFAULT_UNIT } from '../models/units.js';
 import { PAYMENT_METHODS } from '../models/Order.js';
+import { returnedSoFar } from './returnController.js';
 
 /**
  * A quantity cannot be fully judged until the product is known -- whether a
@@ -609,12 +610,64 @@ export async function updateOrder(req, res) {
 /** "INV-000042". Built explicitly because .lean() skips schema virtuals. */
 const receiptNo = (orderNumber) => `INV-${String(orderNumber ?? 0).padStart(6, '0')}`;
 
-/** GET /api/orders?from=&to=&page=1&limit=20 */
+/** Escapes a user's text so it cannot smuggle regex syntax into the query. */
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Turns what somebody typed into a filter over receipts.
+ *
+ * Three things are worth searching for and a shopkeeper does not announce which
+ * one they mean, so all three are tried at once:
+ *
+ *   "42", "INV-42", "inv-000042"   -> receipt number 42
+ *   "ramesh"                       -> the customer the sale was filed under
+ *   "1250"                         -> a sale that came to exactly that
+ *
+ * The numeric forms are ORed with the name match rather than guessed between,
+ * because "42" is a perfectly good receipt number AND a perfectly good total,
+ * and a search that silently picked one would look broken from the other side.
+ *
+ * Returns null when the query is empty, which is the caller's signal to fall
+ * back to the plain date-windowed listing.
+ */
+function searchFilter(raw) {
+  const q = String(raw ?? '').trim();
+  if (!q) return null;
+
+  const or = [{ customerName: { $regex: escapeRegex(q), $options: 'i' } }];
+
+  /* "INV-000042", "inv 42" and "42" all mean receipt 42. Leading zeros are
+     dropped by Number(), which is exactly right here. */
+  const digits = q.replace(/^inv[\s-]*/i, '').replace(/[^0-9.]/g, '');
+  if (digits && Number.isFinite(Number(digits))) {
+    const n = Number(digits);
+    if (Number.isInteger(n) && n > 0) or.push({ orderNumber: n });
+    /* Matched on the rounded total rather than a range: the figure a shop
+       remembers is the one that was on the screen. */
+    or.push({ grandTotal: round2(n) });
+  }
+
+  return { $or: or };
+}
+
+/**
+ * GET /api/orders?from=&to=&page=1&limit=20&q=
+ *
+ * With `q`, the date window is deliberately IGNORED. Somebody hunting for a
+ * receipt is hunting precisely because it is not in front of them, and a search
+ * that only looked inside the month already on screen would answer "no such
+ * sale" about a sale that exists. The response says which mode it answered in
+ * so the screen can tell the operator.
+ */
 export async function listOrders(req, res) {
   const { from, to } = parseDateRange(req.query);
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
-  const filter = { businessId: req.businessId, timestamp: { $gte: from, $lte: to } };
+
+  const search = searchFilter(req.query.q);
+  const filter = search
+    ? { businessId: req.businessId, ...search }
+    : { businessId: req.businessId, timestamp: { $gte: from, $lte: to } };
 
   const [orders, total] = await Promise.all([
     Order.find(filter).sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit).lean(),
@@ -625,16 +678,40 @@ export async function listOrders(req, res) {
     ok: true,
     orders: orders.map((o) => ({ ...o, receiptNo: receiptNo(o.orderNumber) })),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
-    range: { from, to },
+    ...(search
+      ? { search: { q: String(req.query.q).trim(), allTime: true } }
+      : { range: { from, to } }),
   });
 }
 
-/** GET /api/orders/:id -- receipt reprint */
+/**
+ * GET /api/orders/:id -- receipt reprint, and what is left of it.
+ *
+ * Each line carries `returned` and `returnable` so the return form can cap its
+ * steppers without a second round trip, and so the receipt can say "2 of 3
+ * returned" rather than looking untouched after half of it came back.
+ */
 export async function getOrder(req, res) {
   assertObjectId(req.params.id);
   const order = await Order.findOne({ _id: req.params.id, businessId: req.businessId }).lean();
   if (!order) throw ApiError.notFound('Order not found');
-  res.json({ ok: true, order: { ...order, receiptNo: receiptNo(order.orderNumber) } });
+
+  const { byProduct, returns } = await returnedSoFar(req.businessId, order._id);
+  const items = order.items.map((l) => {
+    const returned = byProduct.get(String(l.productId)) ?? 0;
+    return { ...l, returned, returnable: round3(Math.max(0, l.qty - returned)) };
+  });
+
+  res.json({
+    ok: true,
+    order: {
+      ...order,
+      items,
+      receiptNo: receiptNo(order.orderNumber),
+      returnedTotal: round2(returns.reduce((sum, r) => sum + (r.refundTotal || 0), 0)),
+      returnCount: returns.length,
+    },
+  });
 }
 
 /**

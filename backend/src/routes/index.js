@@ -10,6 +10,7 @@ import adminRoutes from './adminRoutes.js';
 import backupRoutes from './backupRoutes.js';
 import customerRoutes from './customerRoutes.js';
 import paymentRoutes from './paymentRoutes.js';
+import returnRoutes from './returnRoutes.js';
 
 const router = Router();
 
@@ -22,6 +23,7 @@ router.use('/images', imageRoutes);
 router.use('/reports', reportRoutes);
 router.use('/customers', customerRoutes);
 router.use('/payments', paymentRoutes);
+router.use('/returns', returnRoutes);
 router.use('/backup', backupRoutes);
 router.use('/admin', adminRoutes);
 

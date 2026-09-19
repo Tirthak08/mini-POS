@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { Business, Category, Product, Order, Counter, ProductImage, StockMovement, Expense, Customer, Payment, toSlug } from '../models/index.js';
+import { Business, Category, Product, Order, Counter, ProductImage, StockMovement, Expense, Customer, Payment, Return, toSlug } from '../models/index.js';
 import { ApiError } from '../utils/ApiError.js';
 import { round2 } from '../utils/validators.js';
 import { isTransactionUnsupported } from '../utils/txnSupport.js';
@@ -164,6 +164,7 @@ export async function deleteBusiness(req, res) {
     const categories = await Category.softDeleteMany({ businessId }, { by, session });
     const images = await ProductImage.softDeleteMany({ businessId }, { by, session });
     await StockMovement.softDeleteMany({ businessId }, { by, session });
+    await Return.softDeleteMany({ businessId }, { by, session });
     await Business.softDeleteMany({ businessId }, { by, session });
     return {
       orders: orders.modifiedCount || 0,
@@ -234,6 +235,7 @@ export async function restoreBusiness(req, res) {
     const categories = await Category.restoreMany({ businessId, deletedBy: by }, { session });
     await ProductImage.restoreMany({ businessId, deletedBy: by }, { session });
     await StockMovement.restoreMany({ businessId, deletedBy: by }, { session });
+    await Return.restoreMany({ businessId, deletedBy: by }, { session });
     await Business.updateOne(
       { businessId },
       { deletedAt: null, deletedBy: null, name, slug: toSlug(name) },
@@ -286,9 +288,13 @@ export async function purgeBusiness(req, res) {
     // could ever read or delete again.
     const expenses = await Expense.hardDeleteMany({ businessId }, { session });
     const payments = await Payment.hardDeleteMany({ businessId }, { session });
+    const returns = await Return.hardDeleteMany({ businessId }, { session });
     const customers = await Customer.hardDeleteMany({ businessId }, { session });
     await Business.deleteMany({ businessId }, { withDeleted: true, ...(session && { session }) });
-    await Counter.deleteMany({ _id: `${businessId}:order` }, { ...(session && { session }) });
+    await Counter.deleteMany(
+      { _id: { $in: [`${businessId}:order`, `${businessId}:return`] } },
+      { ...(session && { session }) }
+    );
     return {
       orders: orders.deletedCount || 0,
       products: products.deletedCount || 0,
@@ -297,6 +303,7 @@ export async function purgeBusiness(req, res) {
       movements: movements.deletedCount || 0,
       expenses: expenses.deletedCount || 0,
       payments: payments.deletedCount || 0,
+      returns: returns.deletedCount || 0,
       customers: customers.deletedCount || 0,
       business: 1,
     };

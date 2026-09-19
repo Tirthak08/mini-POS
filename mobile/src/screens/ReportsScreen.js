@@ -230,6 +230,10 @@ export default function ReportsScreen() {
    * shop that took no money.
    */
   const payments = data?.summary?.payments ?? [];
+  /* Absent on a server that predates returns, in which case there is nothing
+     to net off and the tiles below simply do not appear. */
+  const refunds = sales?.refunds ?? 0;
+  const netRevenue = sales?.netRevenue ?? sales?.revenue ?? 0;
   /**
    * Deliberately NOT part of the period figures above it: a debt is outstanding
    * until it is paid, and a number that shrank every time the date filter
@@ -340,7 +344,17 @@ export default function ReportsScreen() {
             {/* -------------------- KPI tiles -------------------- */}
             <View className="mt-4 px-4">
               <View className="flex-row gap-2">
-                <StatTile className="flex-1" label={t('reports.revenue')} value={formatINR(sales.revenue)} tone="brand" />
+                {/* Revenue stays the gross figure the receipts add up to --
+                    that is what the word has always meant on this screen. When
+                    goods have come back, the tile says so underneath rather
+                    than quietly showing a different number than last week. */}
+                <StatTile
+                  className="flex-1"
+                  label={t('reports.revenue')}
+                  value={formatINR(sales.revenue)}
+                  sub={refunds > 0 ? t('reports.lessRefunds', { amount: formatINR(refunds) }) : undefined}
+                  tone="brand"
+                />
                 {/* Explicitly GROSS. It is the same number this tile has always
                     shown; only the label changed, because calling it "Profit"
                     while rent and wages were missing from it was the half-truth
@@ -376,6 +390,26 @@ export default function ReportsScreen() {
                   tone={netProfit >= 0 ? 'positive' : 'negative'}
                 />
               </View>
+              {refunds > 0 ? (
+                <View className="mt-2 flex-row gap-2">
+                  <StatTile
+                    className="flex-1"
+                    label={t('reports.refunds')}
+                    value={formatINR(refunds)}
+                    sub={t('reports.refundCount', { count: sales.refundCount ?? 0 })}
+                    tone="negative"
+                  />
+                  {/* What the shop actually kept. Shown beside the refund
+                      rather than instead of revenue, so both questions --
+                      "what did I sell" and "what stuck" -- have an answer. */}
+                  <StatTile
+                    className="flex-1"
+                    label={t('reports.netRevenue')}
+                    value={formatINR(netRevenue)}
+                  />
+                </View>
+              ) : null}
+
               {receivablesTile}
 
               {/* How the takings actually arrived.
@@ -402,6 +436,9 @@ export default function ReportsScreen() {
                         <Text className="ml-2 text-xs text-slate-400">
                           {t('reports.ordersShort', { count: p.orders })}
                           {p.repayments ? ` + ${t('reports.repaymentsShort', { count: p.repayments })}` : ''}
+                          {/* Said on the row it came out of, because that is
+                              the drawer somebody is about to count. */}
+                          {p.refunds ? ` − ${t('reports.refundsShort', { amount: formatINR(p.refunded) })}` : ''}
                         </Text>
                       </View>
                       <View className="flex-row items-baseline">

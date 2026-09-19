@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { Customer, Order, Payment } from '../models/index.js';
+import { Customer, Order, Payment, Return } from '../models/index.js';
 import { ApiError } from '../utils/ApiError.js';
 import { requireFields, assertObjectId, toAmount, round2 } from '../utils/validators.js';
 import { PAYMENT_METHODS } from '../models/Order.js';
@@ -44,11 +44,28 @@ function repaidPipeline(businessId, customerIds = null) {
   ];
 }
 
-/** Merges the two aggregates into one balance per customer id. */
+/**
+  * Refunds knocked off a khata rather than handed back in cash.
+  *
+  * A customer who returns goods bought on credit does not get money; their debt
+  * shrinks. Recording that as a Payment would be the easy shortcut and would be
+  * wrong -- Payment feeds the takings report, and the shop never took this in.
+  */
+function creditedPipeline(businessId, customerIds = null) {
+  const match = { businessId, refundMethod: 'credit', customerId: { $ne: null } };
+  if (customerIds) match.customerId = { $in: customerIds };
+  return [
+    { $match: match },
+    { $group: { _id: '$customerId', credited: { $sum: '$refundTotal' }, notes: { $sum: 1 } } },
+  ];
+}
+
+/** Merges the aggregates into one balance per customer id. */
 async function balancesFor(businessId, customerIds = null) {
-  const [owed, repaid] = await Promise.all([
+  const [owed, repaid, refunded] = await Promise.all([
     Order.aggregate(outstandingPipeline(businessId, customerIds)),
     Payment.aggregate(repaidPipeline(businessId, customerIds)),
+    Return.aggregate(creditedPipeline(businessId, customerIds)),
   ]);
 
   const byId = new Map();
@@ -76,13 +93,30 @@ async function balancesFor(businessId, customerIds = null) {
     byId.set(key, existing);
   }
 
-  for (const [, v] of byId) v.balance = round2(v.credited - v.repaid);
+  for (const row of refunded) {
+    const key = String(row._id);
+    const existing = byId.get(key) ?? {
+      billed: 0, paidAtCounter: 0, credited: 0, repaid: 0, refunded: 0,
+      orders: 0, payments: 0, lastOrderAt: null, lastPaidAt: null,
+    };
+    existing.refunded = round2(row.credited);
+    existing.creditNotes = row.notes;
+    byId.set(key, existing);
+  }
+
+  /* `credited` is what went ON the account, `repaid` is what came back in cash,
+     `refunded` is what came off it because goods did. */
+  for (const [, v] of byId) {
+    v.refunded = round2(v.refunded ?? 0);
+    v.creditNotes = v.creditNotes ?? 0;
+    v.balance = round2(v.credited - v.repaid - v.refunded);
+  }
   return byId;
 }
 
 const EMPTY = {
-  billed: 0, paidAtCounter: 0, credited: 0, repaid: 0, balance: 0,
-  orders: 0, payments: 0, lastOrderAt: null, lastPaidAt: null,
+  billed: 0, paidAtCounter: 0, credited: 0, repaid: 0, refunded: 0, balance: 0,
+  orders: 0, payments: 0, creditNotes: 0, lastOrderAt: null, lastPaidAt: null,
 };
 
 function toMethod(value) {
@@ -229,9 +263,14 @@ export async function getCustomer(req, res) {
 
   const oid = new mongoose.Types.ObjectId(customerId);
 
-  const [orders, payments, balances] = await Promise.all([
+  const [orders, payments, credits, balances] = await Promise.all([
     Order.find({ businessId, customerId: oid }).sort({ timestamp: -1 }).limit(limit).lean(),
     Payment.find({ businessId, customerId: oid }).sort({ at: -1 }).limit(limit).lean(),
+    /* Only the ones that came off the account. A return refunded in cash is a
+       drawer event, not a khata event, and putting it here would suggest the
+       debt moved when it did not. */
+    Return.find({ businessId, customerId: oid, refundMethod: 'credit' })
+      .sort({ at: -1 }).limit(limit).lean(),
     balancesFor(businessId, [oid]),
   ]);
 
@@ -257,6 +296,16 @@ export async function getCustomer(req, res) {
       amount: round2(p.amount),
       method: p.method,
       note: p.note || '',
+    })),
+    ...credits.map((r) => ({
+      type: 'refund',
+      at: r.at,
+      returnId: String(r._id),
+      creditNoteNo: `CN-${String(r.returnNumber ?? 0).padStart(6, '0')}`,
+      receiptNo: `INV-${String(r.orderNumber ?? 0).padStart(6, '0')}`,
+      amount: round2(r.refundTotal),
+      items: r.lines.length,
+      note: r.reason || '',
     })),
   ].sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, limit);
 
